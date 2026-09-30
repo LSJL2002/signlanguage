@@ -1,13 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
+import 'package:gal/gal.dart'; // Import the gal package
 
 List<CameraDescription> cameras = [];
 
 Future<void> main() async {
-  // Ensure Flutter bindings are initialized
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Fetch the available cameras from the device
   try {
     cameras = await availableCameras();
   } on CameraException catch (e) {
@@ -49,8 +48,7 @@ class _CameraScreenState extends State<CameraScreen> {
 
   @override
   void initState() {
-    super.initState(); // Fixed typo here
-    // Initialize the controller with the first camera
+    super.initState();
     _controller = CameraController(
       widget.cameras[0],
       ResolutionPreset.high,
@@ -82,14 +80,23 @@ class _CameraScreenState extends State<CameraScreen> {
         onPressed: () async {
           try {
             await _initializeControllerFuture;
+            
+            // 1. Take the picture
             XFile image = await _controller.takePicture();
+
+            // 2. Save the picture to the phone's gallery
+            await Gal.putImage(image.path);
             
             if (!mounted) return;
             ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text('Picture saved to ${image.path}')),
+              const SnackBar(content: Text('Picture saved to Gallery!')),
             );
           } catch (e) {
             print(e);
+            if (!mounted) return;
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('Failed to save image: $e')),
+            );
           }
         },
         child: const Icon(Icons.camera_alt),
