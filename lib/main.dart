@@ -2,11 +2,14 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
-import 'package:gal/gal.dart'; // Import the gal package
+import 'package:gal/gal.dart';
 
 import 'widgets/adaptive_translation_text.dart';
 import 'history.dart';
 import 'visual_style.dart';
+import 'services/hand_detector_service.dart';
+import 'widgets/landmark_painter.dart';
+import 'widgets/debug_overlay.dart';
 
 List<CameraDescription> cameras = [];
 const mockRecognizedText = '아이스 아메리카노 한 잔 주세요.';
@@ -30,8 +33,7 @@ class MyApp extends StatefulWidget {
 }
 
 class _MyAppState extends State<MyApp> {
-  // Retained independently of Gallery for the future recognition pipeline.
-  XFile? _capturedMedia;
+  String _lastRecognizedText = mockRecognizedText;
 
   @override
   Widget build(BuildContext context) {
@@ -75,21 +77,21 @@ class _MyAppState extends State<MyApp> {
           return CameraScreen(
             cameras: cameras,
             onMediaCaptured: (file, isVideo) {
-              _capturedMedia = file;
               if (!isVideo) {
-                debugPrint(
-                  '[photo] onMediaCaptured received: ${_capturedMedia!.path}',
-                );
+                debugPrint('[photo] onMediaCaptured received: ${file.path}');
               }
+            },
+            onRecognitionResult: (recognizedText) {
+              setState(() {
+                _lastRecognizedText = recognizedText;
+              });
             },
             onVideoSaved: () {
               ScaffoldMessenger.of(context).removeCurrentSnackBar();
-              // Simulated recognition until model output is connected.
-              const recognizedText = mockRecognizedText;
               Navigator.of(context).push(
                 MaterialPageRoute<void>(
                   builder: (_) =>
-                      const CommunicationPage(recognizedText: recognizedText),
+                      CommunicationPage(recognizedText: _lastRecognizedText),
                 ),
               );
             },
@@ -272,17 +274,16 @@ class _CircleButton extends StatelessWidget {
 
 class CameraScreen extends StatefulWidget {
   final List<CameraDescription> cameras;
-
   final VoidCallback? onVideoSaved;
-
-  /// Photos are delivered immediately; video delivery follows Gallery save.
   final void Function(XFile file, bool isVideo)? onMediaCaptured;
+  final void Function(String recognizedText)? onRecognitionResult;
 
   const CameraScreen({
     super.key,
     required this.cameras,
     this.onVideoSaved,
     this.onMediaCaptured,
+    this.onRecognitionResult,
   });
 
   @override
@@ -293,22 +294,35 @@ class _CameraScreenState extends State<CameraScreen> {
   late CameraController _controller;
   late Future<void> _initializeControllerFuture;
 
+  final HandDetectorService _handDetectorService = HandDetectorService();
+
+  bool _hasHand = false;
+  List<Map<String, double>>? _currentLandmarks;
+  int _predictedFingers = -1;
+  String _predictedLabel = '';
+  List<HandDebugLog> _debugLogs = [];
+
   @override
   void initState() {
     super.initState();
     _controller = CameraController(widget.cameras[0], ResolutionPreset.high);
-    _initializeControllerFuture = _controller.initialize();
+    _initializeControllerFuture = _initCameraAndServices();
+  }
+
+  Future<void> _initCameraAndServices() async {
+    await _controller.initialize();
+    await _handDetectorService.init();
   }
 
   @override
   void dispose() {
+    _handDetectorService.close();
     _controller.dispose();
     super.dispose();
   }
 
   bool _recording = false;
   bool _busy = false;
-
   bool _held = false;
 
   bool get _ready => _controller.value.isInitialized;
@@ -322,33 +336,49 @@ class _CameraScreenState extends State<CameraScreen> {
   void _publish(XFile file, bool isVideo) {
     if (!mounted) return;
     widget.onMediaCaptured?.call(file, isVideo);
-    widget.onVideoSaved
-        ?.call(); // Existing result navigation for either media type.
+    widget.onVideoSaved?.call();
+  }
+
+  Future<void> _analyzeAndPublish(XFile mediaFile, bool isVideo) async {
+    try {
+      final result = await _handDetectorService.analyzeImageFile(mediaFile.path);
+
+      if (mounted) {
+        setState(() {
+          _hasHand = result.hasHand;
+          _currentLandmarks = result.landmarks;
+          _predictedFingers = result.predictedSign;
+          _predictedLabel = result.predictedLabel;
+          _debugLogs = result.logs;
+        });
+
+        final text = result.hasHand && result.predictedSign >= 0
+            ? '손 동작: ${result.predictedLabel}'
+            : 'No hand detected';
+
+        widget.onRecognitionResult?.call(text);
+      }
+    } catch (e) {
+      debugPrint('Error analyzing captured file: $e');
+    }
   }
 
   Future<void> _takePhoto() async {
-    debugPrint(
-      '[photo] onTap: ready=$_ready busy=$_busy recording=$_recording platformRecording=${_controller.value.isRecordingVideo}',
-    );
-    if (_busy || _recording || _controller.value.isRecordingVideo) {
-      debugPrint('[photo] blocked: capture or recording in progress');
-      return;
-    }
+    if (_busy || _recording || _controller.value.isRecordingVideo) return;
     if (!_ready) {
       _showError('Camera is not ready');
       return;
     }
     setState(() => _busy = true);
     try {
-      debugPrint('[photo] calling takePicture');
       final photo = await _controller.takePicture();
-      debugPrint('[photo] captured: ${photo.path}');
-      // Diagnostics and Gallery are secondary, even if they are slow or fail.
       unawaited(_checkPhotoFile(photo));
       unawaited(_savePhotoToGallery(photo));
+
+      await _analyzeAndPublish(photo, false);
+
       _publish(photo, false);
     } catch (error) {
-      debugPrint('[photo] failed: $error');
       _showError(error);
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -358,11 +388,9 @@ class _CameraScreenState extends State<CameraScreen> {
   Future<void> _checkPhotoFile(XFile photo) async {
     try {
       final bytes = await photo.length();
-      debugPrint(
-        '[photo] file exists/readable: true, bytes=$bytes, path=${photo.path}',
-      );
+      debugPrint('[photo] file size: $bytes bytes, path: ${photo.path}');
     } catch (error) {
-      debugPrint('[photo] file missing/unreadable: ${photo.path}; $error');
+      debugPrint('[photo] file missing: ${photo.path}; $error');
     }
   }
 
@@ -371,9 +399,7 @@ class _CameraScreenState extends State<CameraScreen> {
       await Gal.putImage(photo.path);
       debugPrint('[photo] Gallery save success: ${photo.path}');
     } catch (error) {
-      debugPrint(
-        '[photo] Gallery save failure (captured file retained): ${photo.path}; $error',
-      );
+      debugPrint('[photo] Gallery save failure: $error');
     }
   }
 
@@ -395,7 +421,6 @@ class _CameraScreenState extends State<CameraScreen> {
     } finally {
       if (mounted) setState(() => _busy = false);
     }
-    // Release can arrive before the platform finishes starting the recording.
     if (mounted && !_held && _recording) await _stopRecording();
   }
 
@@ -413,6 +438,9 @@ class _CameraScreenState extends State<CameraScreen> {
       if (!mounted) return;
       setState(() => _recording = false);
       await Gal.putVideo(video.path);
+
+      await _analyzeAndPublish(video, true);
+
       _publish(video, true);
     } catch (error) {
       if (mounted) {
@@ -457,7 +485,15 @@ class _CameraScreenState extends State<CameraScreen> {
                     child: SizedBox(
                       width: 1000 * ratio,
                       height: 1000,
-                      child: CameraPreview(_controller),
+                      child: Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          CameraPreview(_controller),
+                          CustomPaint(
+                            painter: LandmarkPainter(_currentLandmarks),
+                          ),
+                        ],
+                      ),
                     ),
                   ),
                 );
@@ -472,6 +508,94 @@ class _CameraScreenState extends State<CameraScreen> {
               ),
             ),
           ),
+          // Debug Overlay
+          Positioned(
+            left: 16,
+            top: 80,
+            child: SafeArea(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  DebugOverlay(
+                    hasHand: _hasHand,
+                    landmarkCount: _currentLandmarks?.length ?? 0,
+                    fps: 30.0,
+                    fingerCount: _predictedFingers,
+                  ),
+                  if (_debugLogs.isNotEmpty) ...[
+                    const SizedBox(height: 8),
+                    Container(
+                      width: 280,
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color: Colors.black.withAlpha(200),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: Colors.cyanAccent.withAlpha(100)),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text(
+                            '--- PIPELINE DEBUG LOGS ---',
+                            style: TextStyle(
+                              color: Colors.cyanAccent,
+                              fontSize: 10,
+                              fontWeight: FontWeight.bold,
+                              fontFamily: 'monospace',
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          ..._debugLogs.map((log) => Padding(
+                                padding: const EdgeInsets.symmetric(vertical: 2.0),
+                                child: Text(
+                                  '${log.stage}: ${log.details}',
+                                  style: TextStyle(
+                                    color: log.success ? Colors.greenAccent : Colors.amberAccent,
+                                    fontSize: 10,
+                                    fontFamily: 'monospace',
+                                  ),
+                                ),
+                              )),
+                        ],
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+          Positioned(
+            left: 24,
+            right: 24,
+            top: 240,
+            child: SafeArea(
+              child: Center(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withAlpha(178),
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(
+                      color: _hasHand ? const Color(0xFF00E676) : Colors.white24,
+                      width: 2,
+                    ),
+                  ),
+                  child: Text(
+                    _hasHand && _predictedFingers >= 0
+                        ? '🖐 Sign Detected: $_predictedLabel'
+                        : 'No hand detected',
+                    style: TextStyle(
+                      color: _hasHand ? Colors.white : Colors.white70,
+                      fontSize: 22,
+                      fontWeight: FontWeight.bold,
+                      shadows: textShadow,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
           SafeArea(
             child: Align(
               alignment: Alignment.topCenter,
@@ -480,7 +604,7 @@ class _CameraScreenState extends State<CameraScreen> {
                 child: Row(
                   children: [
                     const Text(
-                      'SIGN LANGUAGE',
+                      'KEYPOINT CLASSIFIER',
                       style: TextStyle(
                         color: Color(0xFF6A818C),
                         fontSize: 12,
@@ -536,10 +660,12 @@ class _CameraScreenState extends State<CameraScreen> {
                   liveRegion: true,
                   child: Text(
                     _busy
-                        ? '처리 중…'
+                        ? '분석 중…'
                         : _recording
                         ? '녹화 중'
-                        : '수어를 들려주세요',
+                        : _hasHand && _predictedFingers >= 0
+                        ? '손 동작: $_predictedLabel'
+                        : '손 동작을 보여주세요',
                     textAlign: TextAlign.center,
                     style: const TextStyle(
                       color: Colors.white,
@@ -550,22 +676,24 @@ class _CameraScreenState extends State<CameraScreen> {
                   ),
                 ),
                 const SizedBox(height: 4),
-                const Text(
-                  'Translate: Please show sign language',
+                Text(
+                  _hasHand && _predictedFingers >= 0
+                      ? 'Detected Sign: $_predictedLabel'
+                      : 'Pointing / Close / Open',
                   textAlign: TextAlign.center,
-                  style: TextStyle(
+                  style: const TextStyle(
                     color: Colors.white,
-                    fontSize: 11,
+                    fontSize: 12,
                     shadows: textShadow,
                   ),
                 ),
                 const SizedBox(height: 4),
                 Text(
                   _busy
-                      ? '저장 후 데모 결과를 표시합니다'
+                      ? '이미지 분석 및 결과 생성 중...'
                       : _recording
                       ? '손을 떼면 녹화가 종료됩니다'
-                      : '탭하여 촬영 · 길게 눌러 녹화',
+                      : '탭하여 촬영/분석 · 길게 눌러 녹화',
                   textAlign: TextAlign.center,
                   style: const TextStyle(
                     color: Colors.white,
@@ -653,7 +781,7 @@ class _CameraScreenState extends State<CameraScreen> {
                 top: false,
                 child: Center(
                   child: Text(
-                    '데모 인식 · 실제 영상 저장',
+                    'Keypoint Classifier: Pointing / Close / Open',
                     style: TextStyle(color: Color(0xFF46565D), fontSize: 12),
                   ),
                 ),
