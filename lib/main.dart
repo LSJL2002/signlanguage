@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:camera/camera.dart';
 import 'package:gal/gal.dart';
 
@@ -8,9 +9,12 @@ import 'widgets/adaptive_translation_text.dart';
 import 'history.dart';
 import 'visual_style.dart';
 import 'services/hand_detector_service.dart';
-import 'widgets/landmark_painter.dart';
 import 'widgets/debug_overlay.dart';
+import 'services/pose_service.dart';
+import 'widgets/pose_painter.dart';
+import 'video_analysis_page.dart';
 
+final trackingRouteObserver = RouteObserver<ModalRoute<void>>();
 List<CameraDescription> cameras = [];
 const mockRecognizedText = '아이스 아메리카노 한 잔 주세요.';
 
@@ -39,6 +43,7 @@ class _MyAppState extends State<MyApp> {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
+      navigatorObservers: [trackingRouteObserver],
       title: 'Lanying',
       theme: ThemeData(
         useMaterial3: true,
@@ -290,12 +295,28 @@ class CameraScreen extends StatefulWidget {
   State<CameraScreen> createState() => _CameraScreenState();
 }
 
-class _CameraScreenState extends State<CameraScreen> {
+class _CameraScreenState extends State<CameraScreen>
+    with WidgetsBindingObserver, RouteAware {
   late CameraController _controller;
   late Future<void> _initializeControllerFuture;
 
   final HandDetectorService _handDetectorService = HandDetectorService();
 
+  final PoseService _poseService = PoseService();
+  bool _debugFacePoints = false;
+  TrackingFrame? _trackingFrame;
+  DeviceOrientation? _trackingOrientation;
+  final Stopwatch _trackingClock = Stopwatch()..start();
+  int _lastTrackingUs = -100000;
+  int _frameId = 0;
+  int _epoch = 0;
+  bool _visible = true;
+  bool _foreground = true;
+  Timer? _expiryTimer;
+  ModalRoute<void>? _route;
+  double _trackingFps = 0;
+  int _lastCompletionUs = 0;
+  Future<void> _lifecycle = Future.value();
   bool _isProcessingLiveFrame = false;
   bool _hasHand = false;
   List<Map<String, double>>? _currentLandmarks;
@@ -306,44 +327,172 @@ class _CameraScreenState extends State<CameraScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _controller = CameraController(widget.cameras[0], ResolutionPreset.high);
     _initializeControllerFuture = _initCameraAndServices();
+    _expiryTimer = Timer.periodic(const Duration(milliseconds: 100), (_) {
+      if (mounted &&
+          _trackingFrame != null &&
+          (_trackingClock.elapsedMicroseconds - _trackingFrame!.timestampUs >
+                  500000 ||
+              _trackingOrientation != _controller.value.deviceOrientation ||
+              !_visible ||
+              !_foreground ||
+              _busy ||
+              _recording)) {
+        setState(() {
+          _trackingFrame = null;
+          _trackingFps = 0;
+        });
+      }
+    });
   }
 
   Future<void> _initCameraAndServices() async {
     await _controller.initialize();
+    if (!mounted) return;
     await _handDetectorService.init();
+    if (!mounted) {
+      _handDetectorService.close();
+      return;
+    }
+    await _poseService.initialize();
 
-    if (mounted) {
-      _controller.startImageStream(_processLiveCameraFrame);
+    if (mounted && _foreground && _visible) {
+      await _controller.startImageStream(_processLiveCameraFrame);
     }
   }
 
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final route = ModalRoute.of(context);
+    if (route != _route) {
+      trackingRouteObserver.unsubscribe(this);
+      _route = route;
+      if (route != null) trackingRouteObserver.subscribe(this, route);
+    }
+  }
+
+  void _invalidateTracking() {
+    _epoch++;
+    if (mounted) {
+      setState(() {
+        _trackingFrame = null;
+        _trackingFps = 0;
+      });
+    }
+  }
+
+  @override
+  void didPushNext() {
+    _visible = false;
+    _invalidateTracking();
+  }
+
+  @override
+  void didPopNext() {
+    _visible = true;
+    _invalidateTracking();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _foreground = state == AppLifecycleState.resumed;
+    _invalidateTracking();
+    final resume = _foreground;
+    _lifecycle = _lifecycle.then((_) async {
+      try {
+        await _initializeControllerFuture;
+        if (!mounted) return;
+        if (!resume) {
+          if (_controller.value.isStreamingImages) {
+            await _controller.stopImageStream();
+          }
+          await _controller.pausePreview();
+          if (!_uploading) await _poseService.close();
+        } else {
+          if (!_uploading) await _poseService.initialize();
+          if (!mounted || !_foreground) return;
+          await _controller.resumePreview();
+          if (!_uploading && !_controller.value.isStreamingImages) {
+            await _controller.startImageStream(_processLiveCameraFrame);
+          }
+        }
+      } catch (e) {
+        debugPrint('Tracking lifecycle: $e');
+      }
+    });
+  }
+
   void _processLiveCameraFrame(CameraImage image) async {
-    if (_isProcessingLiveFrame || _busy || _recording) return;
+    final now = _trackingClock.elapsedMicroseconds;
+    if (_isProcessingLiveFrame ||
+        _busy ||
+        _recording ||
+        !_visible ||
+        !_foreground ||
+        now - _lastTrackingUs < 100000) {
+      return;
+    }
     _isProcessingLiveFrame = true;
-
+    _lastTrackingUs = now;
+    final epoch = _epoch;
+    final orientation = _controller.value.deviceOrientation;
+    final description = widget.cameras[0];
+    final front = description.lensDirection == CameraLensDirection.front;
     try {
-      final cameraDescription = widget.cameras[0];
-      final int rotationDegrees = cameraDescription.sensorOrientation;
-      final bool isFrontCamera = cameraDescription.lensDirection == CameraLensDirection.front;
-
-      final result = await _handDetectorService.processLiveFrame(
-        image: image,
-        rotationDegrees: rotationDegrees,
-        isFrontCamera: isFrontCamera,
+      final result = await _poseService.detect(
+        image,
+        rotation: poseRotation(
+          description.sensorOrientation,
+          orientation,
+          front,
+        ),
+        mirror: front,
+        frameId: ++_frameId,
+        timestampUs: now,
       );
-
-      if (mounted) {
-        setState(() {
-          _hasHand = result.hasHand;
-          _currentLandmarks = result.landmarks;
-          _predictedFingers = result.predictedSign;
-          _predictedLabel = result.predictedLabel;
-        });
+      if (!mounted ||
+          epoch != _epoch ||
+          !_visible ||
+          !_foreground ||
+          _busy ||
+          _recording) {
+        return;
+      }
+      final completed = _trackingClock.elapsedMicroseconds;
+      final fresh =
+          completed - now <= 500000 &&
+          orientation == _controller.value.deviceOrientation;
+      debugPrint(
+        'KSL_PREVIEW frameId=${result?.frameId} face=${result?.face.length ?? 0} fresh=$fresh latencyMs=${(completed - now) / 1000}',
+      );
+      // Choose one identified hand for the existing classifier; never concatenate hands/body.
+      final selected = fresh ? (result?.rightHand ?? result?.leftHand) : null;
+      final classification = _handDetectorService.classifyLandmarks(
+        selected?.landmarks,
+      );
+      setState(() {
+        _trackingFrame = fresh ? result : null;
+        _trackingOrientation = orientation;
+        _trackingFps = _lastCompletionUs == 0
+            ? 0
+            : 1000000 / (completed - _lastCompletionUs);
+        _lastCompletionUs = completed;
+        _hasHand = classification.hasHand;
+        _currentLandmarks = classification.landmarks;
+        _predictedFingers = classification.predictedSign;
+        _predictedLabel = classification.predictedLabel;
+      });
+      if (_frameId % 30 == 0) {
+        debugPrint(
+          '[tracking] frame=$_frameId latencyMs=${(completed - now) / 1000} fps=${_trackingFps.toStringAsFixed(1)} body=${result?.body.length ?? 0} left=${result?.leftHand?.landmarks.length ?? 0} right=${result?.rightHand?.landmarks.length ?? 0}',
+        );
       }
     } catch (e) {
-      debugPrint('Error processing live frame: $e');
+      if (mounted) _invalidateTracking();
+      debugPrint('Error processing tracking frame: $e');
     } finally {
       _isProcessingLiveFrame = false;
     }
@@ -351,16 +500,79 @@ class _CameraScreenState extends State<CameraScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    trackingRouteObserver.unsubscribe(this);
+    _expiryTimer?.cancel();
+    _epoch++;
     if (_controller.value.isStreamingImages) {
       _controller.stopImageStream();
     }
     _handDetectorService.close();
+    unawaited(_poseService.close());
     _controller.dispose();
     super.dispose();
   }
 
   bool _recording = false;
   bool _busy = false;
+  bool _uploading = false;
+
+  Future<void> _uploadVideo() async {
+    if (_busy || _recording || _controller.value.isRecordingVideo) return;
+    _invalidateTracking();
+    setState(() {
+      _busy = true;
+      _uploading = true;
+    });
+    try {
+      await _initializeControllerFuture;
+      if (_controller.value.isStreamingImages) {
+        await _controller.stopImageStream();
+      }
+      final uri = await const MethodChannel(
+        'com.example.signlanguage/video_picker',
+      ).invokeMethod<String>('pickVideo');
+      await _lifecycle;
+      if (!mounted || uri == null) return;
+      await _poseService.initialize();
+      if (_poseService.error != null) throw StateError(_poseService.error!);
+      if (!mounted) return;
+      await Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) =>
+              VideoAnalysisPage(uri: uri, detector: _handDetectorService),
+        ),
+      );
+    } catch (e) {
+      debugPrint('[video upload] $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Unable to open video. Please try again.'),
+          ),
+        );
+      }
+    } finally {
+      _uploading = false;
+      if (mounted) {
+        try {
+          await _lifecycle;
+          await _poseService.initialize();
+          if (mounted &&
+              _foreground &&
+              _controller.value.isInitialized &&
+              !_controller.value.isStreamingImages) {
+            await _controller.startImageStream(_processLiveCameraFrame);
+          }
+        } catch (e) {
+          debugPrint('[video upload] camera resume failed: $e');
+        } finally {
+          if (mounted) setState(() => _busy = false);
+        }
+      }
+    }
+  }
+
   bool _held = false;
 
   bool get _ready => _controller.value.isInitialized;
@@ -379,7 +591,9 @@ class _CameraScreenState extends State<CameraScreen> {
 
   Future<void> _analyzeAndPublish(XFile mediaFile, bool isVideo) async {
     try {
-      final result = await _handDetectorService.analyzeImageFile(mediaFile.path);
+      final result = await _handDetectorService.analyzeImageFile(
+        mediaFile.path,
+      );
 
       if (mounted) {
         setState(() {
@@ -407,6 +621,7 @@ class _CameraScreenState extends State<CameraScreen> {
       _showError('Camera is not ready');
       return;
     }
+    _invalidateTracking();
     setState(() => _busy = true);
     try {
       final photo = await _controller.takePicture();
@@ -448,6 +663,7 @@ class _CameraScreenState extends State<CameraScreen> {
       return;
     }
     _held = true;
+    _invalidateTracking();
     setState(() => _busy = true);
     try {
       await _controller.startVideoRecording();
@@ -470,6 +686,7 @@ class _CameraScreenState extends State<CameraScreen> {
 
   Future<void> _stopRecording() async {
     if (_busy || !_recording) return;
+    _invalidateTracking();
     setState(() => _busy = true);
     try {
       final video = await _controller.stopVideoRecording();
@@ -527,8 +744,15 @@ class _CameraScreenState extends State<CameraScreen> {
                         fit: StackFit.expand,
                         children: [
                           CameraPreview(_controller),
-                          CustomPaint(
-                            painter: LandmarkPainter(_currentLandmarks),
+                          IgnorePointer(
+                            child: CustomPaint(
+                              painter: TrackingPainter(
+                                _busy || _recording || !_foreground || !_visible
+                                    ? null
+                                    : _trackingFrame,
+                                debugFacePoints: _debugFacePoints,
+                              ),
+                            ),
                           ),
                         ],
                       ),
@@ -546,6 +770,21 @@ class _CameraScreenState extends State<CameraScreen> {
               ),
             ),
           ),
+          if (_poseService.error != null)
+            Positioned(
+              left: 16,
+              right: 16,
+              bottom: stripHeight + 140,
+              child: IgnorePointer(
+                child: Text(
+                  _poseService.error!,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    shadows: textShadow,
+                  ),
+                ),
+              ),
+            ),
           // Debug Overlay
           Positioned(
             left: 16,
@@ -556,9 +795,13 @@ class _CameraScreenState extends State<CameraScreen> {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   DebugOverlay(
+                    faceLandmarkCount: _trackingFrame?.face.length ?? 0,
+                    faceDots: _debugFacePoints,
+                    onToggleFaceDots: () =>
+                        setState(() => _debugFacePoints = !_debugFacePoints),
                     hasHand: _hasHand,
                     landmarkCount: _currentLandmarks?.length ?? 0,
-                    fps: 30.0,
+                    fps: _trackingFps,
                     fingerCount: _predictedFingers,
                   ),
                   if (_debugLogs.isNotEmpty) ...[
@@ -569,7 +812,9 @@ class _CameraScreenState extends State<CameraScreen> {
                       decoration: BoxDecoration(
                         color: Colors.black.withAlpha(200),
                         borderRadius: BorderRadius.circular(8),
-                        border: Border.all(color: Colors.cyanAccent.withAlpha(100)),
+                        border: Border.all(
+                          color: Colors.cyanAccent.withAlpha(100),
+                        ),
                       ),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
@@ -584,17 +829,23 @@ class _CameraScreenState extends State<CameraScreen> {
                             ),
                           ),
                           const SizedBox(height: 4),
-                          ..._debugLogs.map((log) => Padding(
-                                padding: const EdgeInsets.symmetric(vertical: 2.0),
-                                child: Text(
-                                  '${log.stage}: ${log.details}',
-                                  style: TextStyle(
-                                    color: log.success ? Colors.greenAccent : Colors.amberAccent,
-                                    fontSize: 10,
-                                    fontFamily: 'monospace',
-                                  ),
+                          ..._debugLogs.map(
+                            (log) => Padding(
+                              padding: const EdgeInsets.symmetric(
+                                vertical: 2.0,
+                              ),
+                              child: Text(
+                                '${log.stage}: ${log.details}',
+                                style: TextStyle(
+                                  color: log.success
+                                      ? Colors.greenAccent
+                                      : Colors.amberAccent,
+                                  fontSize: 10,
+                                  fontFamily: 'monospace',
                                 ),
-                              )),
+                              ),
+                            ),
+                          ),
                         ],
                       ),
                     ),
@@ -610,12 +861,17 @@ class _CameraScreenState extends State<CameraScreen> {
             child: SafeArea(
               child: Center(
                 child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 20,
+                    vertical: 12,
+                  ),
                   decoration: BoxDecoration(
                     color: Colors.black.withAlpha(178),
                     borderRadius: BorderRadius.circular(16),
                     border: Border.all(
-                      color: _hasHand ? const Color(0xFF00E676) : Colors.white24,
+                      color: _hasHand
+                          ? const Color(0xFF00E676)
+                          : Colors.white24,
                       width: 2,
                     ),
                   ),
@@ -641,16 +897,24 @@ class _CameraScreenState extends State<CameraScreen> {
                 padding: const EdgeInsets.fromLTRB(24, 16, 24, 0),
                 child: Row(
                   children: [
-                    const Text(
-                      'KEYPOINT CLASSIFIER',
-                      style: TextStyle(
-                        color: Color(0xFF6A818C),
-                        fontSize: 12,
-                        letterSpacing: 2.5,
-                        shadows: textShadow,
+                    const Flexible(
+                      child: Text(
+                        'KEYPOINT CLASSIFIER',
+                        style: TextStyle(
+                          color: Color(0xFF6A818C),
+                          fontSize: 12,
+                          letterSpacing: 2.5,
+                          shadows: textShadow,
+                        ),
                       ),
                     ),
                     const Spacer(),
+                    FilledButton.tonalIcon(
+                      label: const Text('Upload'),
+                      onPressed: _busy || _recording ? null : _uploadVideo,
+                      icon: const Icon(Icons.video_library_outlined),
+                    ),
+                    const SizedBox(width: 8),
                     Container(
                       width: 56,
                       height: 56,

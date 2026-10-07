@@ -1,6 +1,8 @@
 package com.example.signlanguage
 
 import android.graphics.Bitmap
+import android.app.Activity
+import android.content.Intent
 import android.graphics.BitmapFactory
 import android.graphics.ImageFormat
 import android.graphics.Matrix
@@ -14,6 +16,7 @@ import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarker
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import io.flutter.plugin.common.StandardMethodCodec
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.nio.ByteBuffer
@@ -21,11 +24,32 @@ import java.nio.ByteBuffer
 class MainActivity : FlutterActivity() {
     private val CHANNEL = "com.example.signlanguage/mediapipe"
     private var handLandmarker: HandLandmarker? = null
+    private var videoPickerResult: MethodChannel.Result? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "com.example.signlanguage/video_picker")
+            .setMethodCallHandler { call, result ->
+                if (call.method != "pickVideo") result.notImplemented()
+                else if (videoPickerResult != null) result.error("PICKER_BUSY", "Video picker already open", null)
+                else {
+                    videoPickerResult = result
+                    try {
+                        startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                            type = "video/*"
+                            addCategory(Intent.CATEGORY_OPENABLE)
+                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        }, 701)
+                    } catch (e: Exception) {
+                        videoPickerResult = null
+                        result.error("PICKER_ERROR", e.message, null)
+                    }
+                }
+            }
+        PoseChannel(applicationContext, flutterEngine.dartExecutor.binaryMessenger)
 
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL,
+            StandardMethodCodec.INSTANCE, flutterEngine.dartExecutor.binaryMessenger.makeBackgroundTaskQueue()).setMethodCallHandler { call, result ->
             when (call.method) {
                 "initHandLandmarker" -> {
                     try {
@@ -38,10 +62,11 @@ class MainActivity : FlutterActivity() {
                             .setMinHandDetectionConfidence(0.3f)
                             .setMinHandPresenceConfidence(0.3f)
                             .setMinTrackingConfidence(0.3f)
-                            .setNumHands(1)
+                            .setNumHands(2)
                             .setRunningMode(RunningMode.IMAGE)
                             .build()
 
+                        handLandmarker?.close()
                         handLandmarker = HandLandmarker.createFromOptions(context, options)
                         result.success(true)
                     } catch (e: Exception) {
@@ -69,23 +94,21 @@ class MainActivity : FlutterActivity() {
                         }
 
                         val mpImage: MPImage = BitmapImageBuilder(bitmap).build()
-                        val detectionResult = landmarker.detect(mpImage)
-
-                        val landmarksList = mutableListOf<Map<String, Double>>()
-                        if (detectionResult != null && detectionResult.landmarks().isNotEmpty()) {
-                            val firstHand = detectionResult.landmarks()[0]
-                            for (landmark in firstHand) {
-                                landmarksList.add(
-                                    mapOf(
-                                        "x" to landmark.x().toDouble(),
-                                        "y" to landmark.y().toDouble(),
-                                        "z" to landmark.z().toDouble()
-                                    )
-                                )
-                            }
+                        try {
+                            val detectionResult = landmarker.detect(mpImage)
+                            result.success(detectionResult.landmarks().mapIndexed { index, points ->
+                                val category = detectionResult.handedness()[index].maxByOrNull { it.score() }
+                                val rawSide = category?.categoryName() ?: "Unknown"
+                                val side = if (false || rawSide == "Unknown") rawSide
+                                    else if (rawSide == "Left") "Right" else "Left"
+                                mapOf("handedness" to side, "confidence" to (category?.score()?.toDouble() ?: 0.0),
+                                    "landmarks" to points.map { point -> mapOf(
+                                        "x" to point.x().toDouble(), "y" to point.y().toDouble(), "z" to point.z().toDouble()) })
+                            })
+                        } finally {
+                            mpImage.close()
+                            bitmap.recycle()
                         }
-
-                        result.success(landmarksList)
                     } catch (e: Exception) {
                         result.error("DETECTION_ERROR", "Error detecting hand landmarks: ${e.message}", null)
                     }
@@ -134,27 +157,27 @@ class MainActivity : FlutterActivity() {
                             if (isFrontCamera) {
                                 matrix.postScale(-1f, 1f)
                             }
-                            bitmap = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+                            val original = bitmap
+                            bitmap = Bitmap.createBitmap(original, 0, 0, original.width, original.height, matrix, true)
+                            if (bitmap !== original) original.recycle()
                         }
 
                         val mpImage: MPImage = BitmapImageBuilder(bitmap).build()
-                        val detectionResult = landmarker.detect(mpImage)
-
-                        val landmarksList = mutableListOf<Map<String, Double>>()
-                        if (detectionResult != null && detectionResult.landmarks().isNotEmpty()) {
-                            val firstHand = detectionResult.landmarks()[0]
-                            for (landmark in firstHand) {
-                                landmarksList.add(
-                                    mapOf(
-                                        "x" to landmark.x().toDouble(),
-                                        "y" to landmark.y().toDouble(),
-                                        "z" to landmark.z().toDouble()
-                                    )
-                                )
-                            }
+                        try {
+                            val detectionResult = landmarker.detect(mpImage)
+                            result.success(detectionResult.landmarks().mapIndexed { index, points ->
+                                val category = detectionResult.handedness()[index].maxByOrNull { it.score() }
+                                val rawSide = category?.categoryName() ?: "Unknown"
+                                val side = if (isFrontCamera || rawSide == "Unknown") rawSide
+                                    else if (rawSide == "Left") "Right" else "Left"
+                                mapOf("handedness" to side, "confidence" to (category?.score()?.toDouble() ?: 0.0),
+                                    "landmarks" to points.map { point -> mapOf(
+                                        "x" to point.x().toDouble(), "y" to point.y().toDouble(), "z" to point.z().toDouble()) })
+                            })
+                        } finally {
+                            mpImage.close()
+                            bitmap.recycle()
                         }
-
-                        result.success(landmarksList)
                     } catch (e: Exception) {
                         result.error("DETECTION_ERROR", "Error detecting hand landmarks: ${e.message}", null)
                     }
@@ -171,6 +194,22 @@ class MainActivity : FlutterActivity() {
                 else -> result.notImplemented()
             }
         }
+    }
+
+    @Deprecated("Uses FlutterActivity activity result forwarding")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == 701) {
+            val pending = videoPickerResult
+            videoPickerResult = null
+            pending?.success(if (resultCode == Activity.RESULT_OK) data?.data?.toString() else null)
+        }
+    }
+
+    override fun onDestroy() {
+        videoPickerResult?.success(null)
+        videoPickerResult = null
+        super.onDestroy()
     }
 
     private fun yuv420ToNv21(

@@ -3,11 +3,15 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 class MediaPipeService {
-  static const MethodChannel _channel = MethodChannel('com.example.signlanguage/mediapipe');
+  static const MethodChannel _channel = MethodChannel(
+    'com.example.signlanguage/mediapipe',
+  );
 
   Future<bool> initHandLandmarker() async {
     try {
-      final bool? success = await _channel.invokeMethod<bool>('initHandLandmarker');
+      final bool? success = await _channel.invokeMethod<bool>(
+        'initHandLandmarker',
+      );
       return success ?? false;
     } on PlatformException catch (e) {
       debugPrint('Error initializing MediaPipe HandLandmarker: $e');
@@ -15,18 +19,23 @@ class MediaPipeService {
     }
   }
 
-  Future<List<Map<String, double>>?> detectHandLandmarksFromFile(String filePath) async {
+  Future<List<Map<String, double>>?> detectHandLandmarksFromFile(
+    String filePath,
+  ) async {
     try {
-      final List<dynamic>? rawLandmarks = await _channel.invokeMethod<List<dynamic>>(
-        'detectHandLandmarksFromFile',
-        {'filePath': filePath},
-      );
+      final List<dynamic>? rawLandmarks = await _channel
+          .invokeMethod<List<dynamic>>('detectHandLandmarksFromFile', {
+            'filePath': filePath,
+          });
 
       if (rawLandmarks == null || rawLandmarks.isEmpty) {
         return null;
       }
 
-      return rawLandmarks.map((item) {
+      // Compatibility adapter: old classifier still receives one 21-point hand.
+      // Native response retains both hands and handedness; never flatten to 75 points.
+      final points = (rawLandmarks.first as Map)['landmarks'] as List;
+      return points.map((item) {
         final Map<dynamic, dynamic> map = item as Map<dynamic, dynamic>;
         return {
           'x': (map['x'] as num).toDouble(),
@@ -65,16 +74,17 @@ class MediaPipeService {
         'isFrontCamera': isFrontCamera,
       };
 
-      final List<dynamic>? rawLandmarks = await _channel.invokeMethod<List<dynamic>>(
-        'detectHandLandmarks',
-        arguments,
-      );
+      final List<dynamic>? rawLandmarks = await _channel
+          .invokeMethod<List<dynamic>>('detectHandLandmarks', arguments);
 
       if (rawLandmarks == null || rawLandmarks.isEmpty) {
         return null;
       }
 
-      return rawLandmarks.map((item) {
+      // Compatibility adapter: old classifier still receives one 21-point hand.
+      // Native response retains both hands and handedness; never flatten to 75 points.
+      final points = (rawLandmarks.first as Map)['landmarks'] as List;
+      return points.map((item) {
         final Map<dynamic, dynamic> map = item as Map<dynamic, dynamic>;
         return {
           'x': (map['x'] as num).toDouble(),

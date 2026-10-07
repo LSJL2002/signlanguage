@@ -109,6 +109,25 @@ class HandDetectorService {
     }
   }
 
+  /// Single-hand compatibility only: one 21-point hand produces 42 features.
+  HandAnalysisDebugResult classifyLandmarks(List<Map<String, double>>? points) {
+    final features = points?.length == 21
+        ? HandPreprocessor.preprocess(points!, 1, 1)
+        : null;
+    final prediction = features == null
+        ? -1
+        : _classifierService.predict(features);
+    return HandAnalysisDebugResult(
+      hasHand: points != null,
+      predictedSign: prediction,
+      predictedLabel: prediction < 0
+          ? 'No hand detected'
+          : TFLiteService.getLabel(prediction),
+      landmarks: points,
+      logs: [],
+    );
+  }
+
   Future<HandAnalysisDebugResult> analyzeImageFile(String imagePath) async {
     final List<HandDebugLog> logs = [];
 

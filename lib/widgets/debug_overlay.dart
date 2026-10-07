@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 
 class DebugOverlay extends StatelessWidget {
+  final int faceLandmarkCount;
+  final bool faceDots;
+  final VoidCallback? onToggleFaceDots;
   final bool hasHand;
   final int landmarkCount;
   final double fps;
@@ -8,6 +11,9 @@ class DebugOverlay extends StatelessWidget {
 
   const DebugOverlay({
     super.key,
+    this.faceLandmarkCount = 0,
+    this.faceDots = true,
+    this.onToggleFaceDots,
     required this.hasHand,
     required this.landmarkCount,
     required this.fps,
@@ -27,6 +33,30 @@ class DebugOverlay extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
+          Text(
+            'Face: ${faceLandmarkCount > 0 ? 'YES' : 'NO'}',
+            style: const TextStyle(color: Colors.limeAccent, fontSize: 12),
+          ),
+          Text(
+            'Face landmarks: $faceLandmarkCount',
+            style: const TextStyle(color: Colors.white, fontSize: 12),
+          ),
+          if (onToggleFaceDots != null)
+            GestureDetector(
+              onTap: onToggleFaceDots,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                child: Text(
+                  faceDots
+                      ? 'Face: dots (tap for contours)'
+                      : 'Face: contours (tap for dots)',
+                  style: const TextStyle(
+                    color: Colors.limeAccent,
+                    fontSize: 11,
+                  ),
+                ),
+              ),
+            ),
           Row(
             mainAxisSize: MainAxisSize.min,
             children: [
