@@ -296,6 +296,7 @@ class _CameraScreenState extends State<CameraScreen> {
 
   final HandDetectorService _handDetectorService = HandDetectorService();
 
+  bool _isProcessingLiveFrame = false;
   bool _hasHand = false;
   List<Map<String, double>>? _currentLandmarks;
   int _predictedFingers = -1;
@@ -312,10 +313,47 @@ class _CameraScreenState extends State<CameraScreen> {
   Future<void> _initCameraAndServices() async {
     await _controller.initialize();
     await _handDetectorService.init();
+
+    if (mounted) {
+      _controller.startImageStream(_processLiveCameraFrame);
+    }
+  }
+
+  void _processLiveCameraFrame(CameraImage image) async {
+    if (_isProcessingLiveFrame || _busy || _recording) return;
+    _isProcessingLiveFrame = true;
+
+    try {
+      final cameraDescription = widget.cameras[0];
+      final int rotationDegrees = cameraDescription.sensorOrientation;
+      final bool isFrontCamera = cameraDescription.lensDirection == CameraLensDirection.front;
+
+      final result = await _handDetectorService.processLiveFrame(
+        image: image,
+        rotationDegrees: rotationDegrees,
+        isFrontCamera: isFrontCamera,
+      );
+
+      if (mounted) {
+        setState(() {
+          _hasHand = result.hasHand;
+          _currentLandmarks = result.landmarks;
+          _predictedFingers = result.predictedSign;
+          _predictedLabel = result.predictedLabel;
+        });
+      }
+    } catch (e) {
+      debugPrint('Error processing live frame: $e');
+    } finally {
+      _isProcessingLiveFrame = false;
+    }
   }
 
   @override
   void dispose() {
+    if (_controller.value.isStreamingImages) {
+      _controller.stopImageStream();
+    }
     _handDetectorService.close();
     _controller.dispose();
     super.dispose();

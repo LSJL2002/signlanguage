@@ -1,6 +1,7 @@
 import 'dart:io';
+import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart';
-import 'package:google_mlkit_pose_detection/google_mlkit_pose_detection.dart';
+import 'mediapipe_service.dart';
 import 'hand_preprocessor.dart';
 import 'tflite_service.dart';
 
@@ -33,18 +34,78 @@ class HandAnalysisDebugResult {
 }
 
 class HandDetectorService {
-  late PoseDetector _poseDetector;
+  final MediaPipeService _mediaPipeService = MediaPipeService();
   final TFLiteService _classifierService = TFLiteService();
   bool _isInitialized = false;
 
   Future<void> init() async {
     try {
-      _poseDetector = PoseDetector(options: PoseDetectorOptions());
+      await _mediaPipeService.initHandLandmarker();
       await _classifierService.loadModel();
       _isInitialized = true;
       debugPrint('HandDetectorService initialized successfully.');
     } catch (e) {
       debugPrint('Error initializing HandDetectorService: $e');
+    }
+  }
+
+  /// Processes live camera frame and returns real-time MediaPipe hand keypoints & sign prediction
+  Future<HandAnalysisDebugResult> processLiveFrame({
+    required CameraImage image,
+    required int rotationDegrees,
+    required bool isFrontCamera,
+  }) async {
+    final List<HandDebugLog> logs = [];
+
+    if (!_isInitialized) {
+      await init();
+    }
+
+    try {
+      final landmarks21 = await _mediaPipeService.detectHandLandmarks(
+        image: image,
+        rotationDegrees: rotationDegrees,
+        isFrontCamera: isFrontCamera,
+      );
+
+      if (landmarks21 == null || landmarks21.length < 21) {
+        return HandAnalysisDebugResult(
+          hasHand: false,
+          predictedSign: -1,
+          predictedLabel: 'No hand detected',
+          logs: logs,
+        );
+      }
+
+      final features42 = HandPreprocessor.preprocess(landmarks21, 1.0, 1.0);
+
+      if (features42 == null) {
+        return HandAnalysisDebugResult(
+          hasHand: true,
+          predictedSign: -1,
+          predictedLabel: 'Preprocessing failed',
+          landmarks: landmarks21,
+          logs: logs,
+        );
+      }
+
+      final int prediction = _classifierService.predict(features42);
+      final String label = TFLiteService.getLabel(prediction);
+
+      return HandAnalysisDebugResult(
+        hasHand: true,
+        predictedSign: prediction,
+        predictedLabel: label,
+        landmarks: landmarks21,
+        logs: logs,
+      );
+    } catch (e) {
+      return HandAnalysisDebugResult(
+        hasHand: false,
+        predictedSign: -1,
+        predictedLabel: 'Error',
+        logs: logs,
+      );
     }
   }
 
@@ -56,7 +117,6 @@ class HandDetectorService {
     }
 
     try {
-      // Step 1: Verify file
       final File file = File(imagePath);
       if (!await file.exists()) {
         logs.add(HandDebugLog(
@@ -74,64 +134,35 @@ class HandDetectorService {
 
       logs.add(HandDebugLog(
         stage: '1. Image File',
-        details: 'SUCCESS: Image file loaded (${await file.length()} bytes).',
+        details: 'SUCCESS: Loaded photo file (${await file.length()} bytes).',
         success: true,
       ));
 
-      // Step 2: Extract 2D keypoints using MediaPipe / MLKit
-      final inputImage = InputImage.fromFilePath(imagePath);
-      final poses = await _poseDetector.processImage(inputImage);
+      final landmarks21 = await _mediaPipeService.detectHandLandmarksFromFile(imagePath);
 
-      if (poses.isEmpty || poses.first.landmarks.isEmpty) {
+      if (landmarks21 == null || landmarks21.length < 21) {
         logs.add(HandDebugLog(
-          stage: '2. 2D Keypoint Detection',
-          details: 'RESULT: No pose / keypoints detected in image.',
+          stage: '2. MediaPipe Hand Landmark',
+          details: 'RESULT: No hand detected by MediaPipe HandLandmarker.',
           success: false,
         ));
         return HandAnalysisDebugResult(
           hasHand: false,
           predictedSign: -1,
-          predictedLabel: 'No keypoints detected',
+          predictedLabel: 'No hand detected',
           logs: logs,
         );
       }
-
-      final pose = poses.first;
-      final rawLandmarks = <Map<String, double>>[];
-
-      pose.landmarks.forEach((type, landmark) {
-        rawLandmarks.add({
-          'x': landmark.x,
-          'y': landmark.y,
-        });
-      });
-
-      if (rawLandmarks.length < 21) {
-        logs.add(HandDebugLog(
-          stage: '2. 2D Keypoint Detection',
-          details: 'RESULT: Less than 21 keypoints detected (${rawLandmarks.length}).',
-          success: false,
-        ));
-        return HandAnalysisDebugResult(
-          hasHand: false,
-          predictedSign: -1,
-          predictedLabel: 'Insufficient keypoints',
-          logs: logs,
-        );
-      }
-
-      final landmarks21 = rawLandmarks.sublist(0, 21);
 
       final double wristX = landmarks21[0]['x'] ?? 0.0;
       final double wristY = landmarks21[0]['y'] ?? 0.0;
 
       logs.add(HandDebugLog(
-        stage: '2. 2D Keypoint Detection',
-        details: 'SUCCESS: Extracted 21 keypoints. Wrist: (${wristX.toStringAsFixed(1)}, ${wristY.toStringAsFixed(1)})',
+        stage: '2. MediaPipe Hand Landmark',
+        details: 'SUCCESS: Extracted 21 HAND keypoints. Wrist: (${wristX.toStringAsFixed(2)}, ${wristY.toStringAsFixed(2)})',
         success: true,
       ));
 
-      // Step 3: Preprocess 21 keypoints to 42 float features
       final features42 = HandPreprocessor.preprocess(landmarks21, 1.0, 1.0);
 
       if (features42 == null) {
@@ -155,7 +186,6 @@ class HandDetectorService {
         success: true,
       ));
 
-      // Step 4: Run keypoint_classifier.tflite (0=Pointing, 1=Close, 2=Open)
       final int prediction = _classifierService.predict(features42);
       final String label = TFLiteService.getLabel(prediction);
 
@@ -190,7 +220,7 @@ class HandDetectorService {
   }
 
   void close() {
-    _poseDetector.close();
+    _mediaPipeService.close();
     _classifierService.close();
     _isInitialized = false;
   }
