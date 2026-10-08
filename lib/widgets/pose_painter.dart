@@ -44,19 +44,9 @@ class PosePainter extends CustomPainter {
       ..color = Colors.cyanAccent
       ..strokeWidth = 2;
     final dot = Paint()..color = Colors.cyanAccent;
-    Landmark pointAt(int index) => switch (index) {
-      15 when leftWrist != null => {
-        ...leftWrist!,
-        'visibility': 1,
-        'presence': 1,
-      },
-      16 when rightWrist != null => {
-        ...rightWrist!,
-        'visibility': 1,
-        'presence': 1,
-      },
-      _ => landmarks[index],
-    };
+    // Keep elbow endpoints in Pose's own skeleton: 13→15 and 14→16.
+    // Hand wrists only suppress duplicate dots; they must not replace Pose endpoints.
+    Landmark pointAt(int index) => landmarks[index];
     bool drawable(int index) {
       final p = pointAt(index);
       const threshold = .5;
