@@ -322,7 +322,6 @@ class _CameraScreenState extends State<CameraScreen>
   List<Map<String, double>>? _currentLandmarks;
   int _predictedFingers = -1;
   String _predictedLabel = '';
-  List<HandDebugLog> _debugLogs = [];
 
   @override
   void initState() {
@@ -487,7 +486,7 @@ class _CameraScreenState extends State<CameraScreen>
       });
       if (_frameId % 30 == 0) {
         debugPrint(
-          '[tracking] frame=$_frameId latencyMs=${(completed - now) / 1000} fps=${_trackingFps.toStringAsFixed(1)} body=${result?.body.length ?? 0} left=${result?.leftHand?.landmarks.length ?? 0} right=${result?.rightHand?.landmarks.length ?? 0}',
+          '[tracking] frame=$_frameId latencyMs=${(completed - now) / 1000} fps=${_trackingFps.toStringAsFixed(1)} body=${result?.body.length ?? 0} left=${result?.leftHand?.landmarks.length ?? 0} right=${result?.rightHand?.landmarks.length ?? 0} hasHand=$_hasHand fingers=$_predictedFingers',
         );
       }
     } catch (e) {
@@ -594,6 +593,11 @@ class _CameraScreenState extends State<CameraScreen>
       final result = await _handDetectorService.analyzeImageFile(
         mediaFile.path,
       );
+      for (final log in result.logs) {
+        debugPrint(
+          '[pipeline] ${log.stage}: ${log.details} success=${log.success}',
+        );
+      }
 
       if (mounted) {
         setState(() {
@@ -601,7 +605,6 @@ class _CameraScreenState extends State<CameraScreen>
           _currentLandmarks = result.landmarks;
           _predictedFingers = result.predictedSign;
           _predictedLabel = result.predictedLabel;
-          _debugLogs = result.logs;
         });
 
         final text = result.hasHand && result.predictedSign >= 0
@@ -785,108 +788,20 @@ class _CameraScreenState extends State<CameraScreen>
                 ),
               ),
             ),
-          // Debug Overlay
+          // Compact status panel; detailed pipeline logs remain in the console.
           Positioned(
             left: 16,
             top: 80,
             child: SafeArea(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  DebugOverlay(
-                    faceLandmarkCount: _trackingFrame?.face.length ?? 0,
-                    faceDots: _debugFacePoints,
-                    onToggleFaceDots: () =>
-                        setState(() => _debugFacePoints = !_debugFacePoints),
-                    hasHand: _hasHand,
-                    landmarkCount: _currentLandmarks?.length ?? 0,
-                    fps: _trackingFps,
-                    fingerCount: _predictedFingers,
-                  ),
-                  if (_debugLogs.isNotEmpty) ...[
-                    const SizedBox(height: 8),
-                    Container(
-                      width: 280,
-                      padding: const EdgeInsets.all(8),
-                      decoration: BoxDecoration(
-                        color: Colors.black.withAlpha(200),
-                        borderRadius: BorderRadius.circular(8),
-                        border: Border.all(
-                          color: Colors.cyanAccent.withAlpha(100),
-                        ),
-                      ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text(
-                            '--- PIPELINE DEBUG LOGS ---',
-                            style: TextStyle(
-                              color: Colors.cyanAccent,
-                              fontSize: 10,
-                              fontWeight: FontWeight.bold,
-                              fontFamily: 'monospace',
-                            ),
-                          ),
-                          const SizedBox(height: 4),
-                          ..._debugLogs.map(
-                            (log) => Padding(
-                              padding: const EdgeInsets.symmetric(
-                                vertical: 2.0,
-                              ),
-                              child: Text(
-                                '${log.stage}: ${log.details}',
-                                style: TextStyle(
-                                  color: log.success
-                                      ? Colors.greenAccent
-                                      : Colors.amberAccent,
-                                  fontSize: 10,
-                                  fontFamily: 'monospace',
-                                ),
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-          ),
-          Positioned(
-            left: 24,
-            right: 24,
-            top: 240,
-            child: SafeArea(
-              child: Center(
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 20,
-                    vertical: 12,
-                  ),
-                  decoration: BoxDecoration(
-                    color: Colors.black.withAlpha(178),
-                    borderRadius: BorderRadius.circular(16),
-                    border: Border.all(
-                      color: _hasHand
-                          ? const Color(0xFF00E676)
-                          : Colors.white24,
-                      width: 2,
-                    ),
-                  ),
-                  child: Text(
-                    _hasHand && _predictedFingers >= 0
-                        ? '🖐 Sign Detected: $_predictedLabel'
-                        : 'No hand detected',
-                    style: TextStyle(
-                      color: _hasHand ? Colors.white : Colors.white70,
-                      fontSize: 22,
-                      fontWeight: FontWeight.bold,
-                      shadows: textShadow,
-                    ),
-                  ),
-                ),
+              child: DebugOverlay(
+                faceLandmarkCount: _trackingFrame?.face.length ?? 0,
+                faceDots: _debugFacePoints,
+                onToggleFaceDots: () =>
+                    setState(() => _debugFacePoints = !_debugFacePoints),
+                hasHand: _hasHand,
+                landmarkCount: _currentLandmarks?.length ?? 0,
+                fps: _trackingFps,
+                fingerCount: _predictedFingers,
               ),
             ),
           ),
