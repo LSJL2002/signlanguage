@@ -2,6 +2,9 @@ import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
+import 'pose_target_mapper.dart';
+import 'face_target_mapper.dart';
+
 /// Independent from the hand classifier and its 42-feature input.
 typedef Landmark = Map<String, double>;
 
@@ -39,7 +42,39 @@ class TrackingFrame {
   final int frameId;
   final int timestampUs;
   final List<Landmark> body;
+
+  /// Additive target view; raw Pose 33 remains the source for existing consumers.
+  List<Landmark> get targetPose11 => PoseTargetMapper.map(body);
+
   final List<Landmark> face;
+
+  List<Landmark> get targetFace70 => FaceTargetMapper.map(face);
+
+  /// Fixed target layout: Pose [0..10], Face [11..80], right hand [81..101],
+  /// left hand [102..122]. Missing groups occupy null slots, never zero points.
+  /// This is an additive mapping view, not the model's normalized feature tensor.
+  /// frameId/timestampUs belong to this same source frame. Raw data is unchanged.
+  List<Landmark?> get targetLandmarks123 {
+    List<Landmark?> slots(List<Landmark> points, int count) {
+      if (points.isEmpty) return List<Landmark?>.filled(count, null);
+      if (points.length != count) {
+        throw ArgumentError.value(
+          points.length,
+          'landmark count',
+          'Expected $count',
+        );
+      }
+      return [for (final point in points) Map<String, double>.of(point)];
+    }
+
+    return [
+      ...slots(targetPose11, 11),
+      ...slots(targetFace70, 70),
+      ...slots(rightHand?.landmarks ?? const [], 21),
+      ...slots(leftHand?.landmarks ?? const [], 21),
+    ];
+  }
+
   final TrackedHand? leftHand;
   final TrackedHand? rightHand;
   factory TrackingFrame.fromMap(Map raw) {
