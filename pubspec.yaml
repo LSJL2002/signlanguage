@@ -27,3 +27,6 @@ flutter:
   uses-material-design: true
   assets:
     - assets/models/
+    - saved_models/stage1_model.onnx
+    - saved_models/stage1_model.onnx.data
+    - saved_models/gloss_to_id.json

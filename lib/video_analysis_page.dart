@@ -6,6 +6,7 @@ import 'package:path_provider/path_provider.dart';
 
 import 'services/hand_detector_service.dart';
 import 'services/video_analysis_service.dart';
+import 'services/stage1_onnx_service.dart';
 import 'widgets/pose_painter.dart';
 
 class VideoAnalysisPage extends StatefulWidget {
@@ -34,6 +35,7 @@ class _VideoAnalysisPageState extends State<VideoAnalysisPage>
     WidgetsBinding.instance.addObserver(this);
     _service = VideoAnalysisService(
       classify: widget.detector.classifyLandmarks,
+      recognize: Stage1OnnxService().infer,
     );
     _task = _run();
   }
