@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:camera/camera.dart';
 import 'package:gal/gal.dart';
+import 'package:file_picker/file_picker.dart';
 
 import 'widgets/adaptive_translation_text.dart';
 import 'history.dart';
@@ -12,7 +13,7 @@ import 'services/hand_detector_service.dart';
 import 'widgets/debug_overlay.dart';
 import 'services/pose_service.dart';
 import 'widgets/pose_painter.dart';
-import 'video_analysis_page.dart';
+import 'services/video_prediction_api.dart';
 
 final trackingRouteObserver = RouteObserver<ModalRoute<void>>();
 List<CameraDescription> cameras = [];
@@ -20,11 +21,10 @@ const mockRecognizedText = '아이스 아메리카노 한 잔 주세요.';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-
   try {
     cameras = await availableCameras();
-  } on CameraException catch (e) {
-    debugPrint('Error initializing camera: $e');
+  } on CameraException catch (error) {
+    debugPrint('Error initializing camera: $error');
   }
   runApp(const MyApp());
 }
@@ -299,6 +299,10 @@ class _CameraScreenState extends State<CameraScreen>
     with WidgetsBindingObserver, RouteAware {
   late CameraController _controller;
   late Future<void> _initializeControllerFuture;
+  final VideoPredictionClient _predictionClient = VideoPredictionClient(
+    baseUrl: configuredApiBaseUrl,
+    apiToken: configuredApiToken,
+  );
 
   final HandDetectorService _handDetectorService = HandDetectorService();
 
@@ -508,6 +512,7 @@ class _CameraScreenState extends State<CameraScreen>
     }
     _handDetectorService.close();
     unawaited(_poseService.close());
+    _predictionClient.close();
     _controller.dispose();
     super.dispose();
   }
@@ -528,26 +533,125 @@ class _CameraScreenState extends State<CameraScreen>
       if (_controller.value.isStreamingImages) {
         await _controller.stopImageStream();
       }
-      final uri = await const MethodChannel(
-        'com.example.signlanguage/video_picker',
-      ).invokeMethod<String>('pickVideo');
+      final video = await FilePicker.pickFile(type: FileType.video);
       await _lifecycle;
-      if (!mounted || uri == null) return;
-      await _poseService.initialize();
-      if (_poseService.error != null) throw StateError(_poseService.error!);
+      if (!mounted || video == null) return;
+      final size = await video.length();
+      if (size == null) {
+        throw const VideoPredictionException(
+          'The selected video could not be read. Choose it again and try once more.',
+        );
+      }
       if (!mounted) return;
-      await Navigator.of(context).push(
-        MaterialPageRoute<void>(
-          builder: (_) =>
-              VideoAnalysisPage(uri: uri, detector: _handDetectorService),
+
+      final uploadProgress =
+          ValueNotifier<({int sent, int total, bool waiting})>((
+            sent: 0,
+            total: size,
+            waiting: false,
+          ));
+      var progressDialogOpen = true;
+      unawaited(
+        showDialog<void>(
+          context: context,
+          barrierDismissible: false,
+          builder: (dialogContext) => PopScope(
+            canPop: false,
+            child: AlertDialog(
+              title: const Text('Uploading video'),
+              content:
+                  ValueListenableBuilder<({int sent, int total, bool waiting})>(
+                    valueListenable: uploadProgress,
+                    builder: (context, progress, _) {
+                      final fraction = progress.total == 0
+                          ? null
+                          : (progress.sent / progress.total).clamp(0.0, 1.0);
+                      return Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Text(
+                            video.name,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          const SizedBox(height: 16),
+                          LinearProgressIndicator(
+                            value: progress.waiting ? null : fraction,
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            progress.waiting
+                                ? 'Video sent. Waiting for prediction…'
+                                : fraction == null
+                                ? 'Preparing video…'
+                                : 'Uploading ${(fraction * 100).floor()}%',
+                            textAlign: TextAlign.center,
+                          ),
+                        ],
+                      );
+                    },
+                  ),
+            ),
+          ),
         ),
       );
+      try {
+        final result = await _predictionClient.predict(
+          video.readAsByteStream(),
+          size: size,
+          onProgress: (sent, total) {
+            uploadProgress.value = (
+              sent: sent,
+              total: total,
+              waiting: sent >= total,
+            );
+          },
+        );
+        if (!mounted) return;
+        progressDialogOpen = false;
+        Navigator.of(context).pop();
+        await Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (_) => CommunicationPage(recognizedText: result.sentence),
+          ),
+        );
+      } finally {
+        uploadProgress.dispose();
+        if (progressDialogOpen && mounted) {
+          progressDialogOpen = false;
+          Navigator.of(context).pop();
+        }
+      }
+    } on VideoPredictionException catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(error.message)));
+      }
+    } on PlatformException {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'The video picker could not be opened. Please try again.',
+            ),
+          ),
+        );
+      }
+    } on MissingPluginException {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Video selection is not available on this device.'),
+          ),
+        );
+      }
     } catch (e) {
       debugPrint('[video upload] $e');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('Unable to open video. Please try again.'),
+            content: Text('Unable to upload video. Please try again.'),
           ),
         );
       }
