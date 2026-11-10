@@ -27,24 +27,40 @@ void main() {
   ) async {
     await tester.pumpWidget(host(short));
     expect(tester.getSemantics(textFinder).label, short);
-    expect(
-      tester.widget<Text>(textFinder).data!.replaceAll('\u2060', ''),
-      short,
-    );
-    expect(tester.widget<Text>(textFinder).data, contains('아\u2060이\u2060스'));
+    expect(tester.widget<Text>(textFinder).data, short);
+    expect(tester.widget<Text>(textFinder).softWrap, isTrue);
 
     await tester.pumpWidget(host(long));
     expect(tester.getSemantics(textFinder).label, long);
-    expect(
-      tester.widget<Text>(textFinder).data!.replaceAll('\u2060', ''),
-      long,
-    );
+    expect(tester.widget<Text>(textFinder).data, long);
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('fits text without layout overflow', (tester) async {
-    await tester.pumpWidget(host(long, size: const Size(80, 40), scale: 3));
+  testWidgets('long sentences remain accessible by scrolling', (tester) async {
+    final sentence = List.filled(30, short).join(' ');
+    await tester.pumpWidget(host(sentence, size: const Size(240, 100)));
+
     expect(tester.takeException(), isNull);
-    expect(tester.widget<Text>(textFinder).textAlign, TextAlign.center);
+    expect(
+      tester.widget<SingleChildScrollView>(
+        find.byKey(const Key('translationScrollView')),
+      ),
+      isNotNull,
+    );
+    expect(tester.widget<Text>(textFinder).data, sentence);
+    final scrollable = tester.state<ScrollableState>(
+      find.descendant(
+        of: find.byKey(const Key('translationScrollView')),
+        matching: find.byType(Scrollable),
+      ),
+    );
+    expect(scrollable.position.maxScrollExtent, greaterThan(0));
+    await tester.drag(
+      find.byKey(const Key('translationScrollView')),
+      const Offset(0, -300),
+    );
+    await tester.pumpAndSettle();
+    expect(scrollable.position.pixels, greaterThan(0));
+    expect(tester.takeException(), isNull);
   });
 }
