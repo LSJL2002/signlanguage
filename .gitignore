@@ -35,6 +35,7 @@ migrate_working_dir/
 
 # Bundled models and model data
 /assets/models/
+**/saved_models/
 
 # Symbolication related
 app.*.symbols
