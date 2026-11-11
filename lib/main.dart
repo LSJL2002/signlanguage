@@ -143,6 +143,7 @@ class _CommunicationPageState extends State<CommunicationPage> {
 
   @override
   Widget build(BuildContext context) {
+    debugPrint('KSL_RESULT_UI chars=${widget.recognizedText.length} text=${widget.recognizedText}');
     return Scaffold(
       body: Stack(
         fit: StackFit.expand,
@@ -536,12 +537,16 @@ class _CameraScreenState extends State<CameraScreen>
       await _poseService.initialize();
       if (_poseService.error != null) throw StateError(_poseService.error!);
       if (!mounted) return;
-      await Navigator.of(context).push(
-        MaterialPageRoute<void>(
+      final sentence = await Navigator.of(context).push<String>(
+        MaterialPageRoute<String>(
           builder: (_) =>
               VideoAnalysisPage(uri: uri, detector: _handDetectorService),
         ),
       );
+      if (mounted && sentence != null && sentence.trim().isNotEmpty) {
+        widget.onRecognitionResult?.call(sentence);
+        widget.onVideoSaved?.call();
+      }
     } catch (e) {
       debugPrint('[video upload] $e');
       if (mounted) {

@@ -30,3 +30,8 @@ flutter:
     - saved_models/stage1_model.onnx
     - saved_models/stage1_model.onnx.data
     - saved_models/gloss_to_id.json
+    - saved_models/encoder_model.onnx
+    - saved_models/encoder_model.onnx.data
+    - saved_models/decoder_model_quantized.onnx
+    - saved_models/kobart_tokenizer.json
+    - saved_models/kobart_config.json

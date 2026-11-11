@@ -53,7 +53,7 @@ class AdaptiveTranslationText extends StatelessWidget {
             semanticsLabel: text,
             key: const Key('translationText'),
             textAlign: TextAlign.center,
-            softWrap: false,
+            softWrap: true,
             style: baseStyle.copyWith(fontSize: lower),
           ),
         );

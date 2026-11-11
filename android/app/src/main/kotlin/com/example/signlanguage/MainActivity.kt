@@ -48,6 +48,7 @@ class MainActivity : FlutterActivity() {
             }
         PoseChannel(applicationContext, flutterEngine.dartExecutor.binaryMessenger)
         Stage1OnnxChannel(applicationContext, flutterEngine.dartExecutor.binaryMessenger)
+        Stage2OnnxChannel(applicationContext, flutterEngine.dartExecutor.binaryMessenger)
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL,
             StandardMethodCodec.INSTANCE, flutterEngine.dartExecutor.binaryMessenger.makeBackgroundTaskQueue()).setMethodCallHandler { call, result ->
