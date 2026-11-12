@@ -4,14 +4,15 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:camera/camera.dart';
 import 'package:gal/gal.dart';
+import 'package:file_picker/file_picker.dart';
 
 import 'widgets/adaptive_translation_text.dart';
 import 'history.dart';
 import 'visual_style.dart';
 import 'services/hand_detector_service.dart';
-import 'widgets/debug_overlay.dart';
+import 'widgets/translation_mode_pill.dart';
+import 'services/video_prediction_api.dart';
 import 'services/pose_service.dart';
-import 'widgets/pose_painter.dart';
 import 'video_analysis_page.dart';
 
 final trackingRouteObserver = RouteObserver<ModalRoute<void>>();
@@ -280,6 +281,7 @@ class _CircleButton extends StatelessWidget {
 
 class CameraScreen extends StatefulWidget {
   final List<CameraDescription> cameras;
+  final VideoPredictionApi? predictionApi;
   final VoidCallback? onVideoSaved;
   final void Function(XFile file, bool isVideo)? onMediaCaptured;
   final void Function(String recognizedText)? onRecognitionResult;
@@ -287,6 +289,7 @@ class CameraScreen extends StatefulWidget {
   const CameraScreen({
     super.key,
     required this.cameras,
+    this.predictionApi,
     this.onVideoSaved,
     this.onMediaCaptured,
     this.onRecognitionResult,
@@ -300,11 +303,15 @@ class _CameraScreenState extends State<CameraScreen>
     with WidgetsBindingObserver, RouteAware {
   late CameraController _controller;
   late Future<void> _initializeControllerFuture;
+  final VideoPredictionClient _predictionClient = VideoPredictionClient(
+    baseUrl: configuredApiBaseUrl,
+    apiToken: configuredApiToken,
+  );
 
   final HandDetectorService _handDetectorService = HandDetectorService();
 
   final PoseService _poseService = PoseService();
-  bool _debugFacePoints = false;
+  bool isOnlineMode = false;
   TrackingFrame? _trackingFrame;
   DeviceOrientation? _trackingOrientation;
   final Stopwatch _trackingClock = Stopwatch()..start();
@@ -320,8 +327,11 @@ class _CameraScreenState extends State<CameraScreen>
   Future<void> _lifecycle = Future.value();
   bool _isProcessingLiveFrame = false;
   bool _hasHand = false;
+  // Retained for console diagnostics; not rendered over the preview.
+  // ignore: unused_field
   List<Map<String, double>>? _currentLandmarks;
   int _predictedFingers = -1;
+  // ignore: unused_field
   String _predictedLabel = '';
 
   @override
@@ -401,6 +411,10 @@ class _CameraScreenState extends State<CameraScreen>
     _foreground = state == AppLifecycleState.resumed;
     _invalidateTracking();
     final resume = _foreground;
+    if (!resume) {
+      _cancelRecording = true;
+      if (_recording && !_busy) unawaited(_stopRecording());
+    }
     _lifecycle = _lifecycle.then((_) async {
       try {
         await _initializeControllerFuture;
@@ -509,6 +523,7 @@ class _CameraScreenState extends State<CameraScreen>
     }
     _handDetectorService.close();
     unawaited(_poseService.close());
+    _predictionClient.close();
     _controller.dispose();
     super.dispose();
   }
@@ -517,7 +532,7 @@ class _CameraScreenState extends State<CameraScreen>
   bool _busy = false;
   bool _uploading = false;
 
-  Future<void> _uploadVideo() async {
+  Future<void> _uploadVideoOnline({XFile? recordedVideo}) async {
     if (_busy || _recording || _controller.value.isRecordingVideo) return;
     _invalidateTracking();
     setState(() {
@@ -529,9 +544,174 @@ class _CameraScreenState extends State<CameraScreen>
       if (_controller.value.isStreamingImages) {
         await _controller.stopImageStream();
       }
-      final uri = await const MethodChannel(
-        'com.example.signlanguage/video_picker',
-      ).invokeMethod<String>('pickVideo');
+      final pickedVideo = recordedVideo == null
+          ? await FilePicker.pickFile(type: FileType.video)
+          : null;
+      await _lifecycle;
+      if (!mounted || (recordedVideo == null && pickedVideo == null)) return;
+      final size = recordedVideo != null
+          ? await recordedVideo.length()
+          : await pickedVideo!.length();
+      if (size == null || size <= 0) {
+        throw const VideoPredictionException(
+          'The selected video could not be read. Choose it again and try once more.',
+        );
+      }
+      if (!mounted) return;
+
+      final uploadProgress =
+          ValueNotifier<({int sent, int total, bool waiting})>((
+            sent: 0,
+            total: size,
+            waiting: false,
+          ));
+      var progressDialogOpen = true;
+      unawaited(
+        showDialog<void>(
+          context: context,
+          barrierDismissible: false,
+          builder: (dialogContext) => PopScope(
+            canPop: false,
+            child: AlertDialog(
+              title: const Text('Uploading video'),
+              content:
+                  ValueListenableBuilder<({int sent, int total, bool waiting})>(
+                    valueListenable: uploadProgress,
+                    builder: (context, progress, _) {
+                      final fraction = progress.total == 0
+                          ? null
+                          : (progress.sent / progress.total).clamp(0.0, 1.0);
+                      return Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Text(
+                            recordedVideo?.name ?? pickedVideo!.name,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          const SizedBox(height: 16),
+                          LinearProgressIndicator(
+                            value: progress.waiting ? null : fraction,
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            progress.waiting
+                                ? 'Video sent. Waiting for prediction…'
+                                : fraction == null
+                                ? 'Preparing video…'
+                                : 'Uploading ${(fraction * 100).floor()}%',
+                            textAlign: TextAlign.center,
+                          ),
+                        ],
+                      );
+                    },
+                  ),
+            ),
+          ),
+        ),
+      );
+      try {
+        final result = await (widget.predictionApi ?? _predictionClient)
+            .predict(
+              recordedVideo?.openRead() ?? pickedVideo!.readAsByteStream(),
+              size: size,
+              onProgress: (sent, total) {
+                uploadProgress.value = (
+                  sent: sent,
+                  total: total,
+                  waiting: sent >= total,
+                );
+              },
+            );
+        if (!mounted) return;
+        progressDialogOpen = false;
+        Navigator.of(context).pop();
+        await Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (_) => CommunicationPage(recognizedText: result.sentence),
+          ),
+        );
+      } finally {
+        uploadProgress.dispose();
+        if (progressDialogOpen && mounted) {
+          progressDialogOpen = false;
+          Navigator.of(context).pop();
+        }
+      }
+    } on VideoPredictionException catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(error.message)));
+      }
+    } on PlatformException {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'The video picker could not be opened. Please try again.',
+            ),
+          ),
+        );
+      }
+    } on MissingPluginException {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Video selection is not available on this device.'),
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('[video upload] $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Unable to upload video. Please try again.'),
+          ),
+        );
+      }
+    } finally {
+      _uploading = false;
+      if (mounted) {
+        try {
+          await _lifecycle;
+          await _poseService.initialize();
+          if (mounted &&
+              _foreground &&
+              _controller.value.isInitialized &&
+              !_controller.value.isStreamingImages) {
+            await _controller.startImageStream(_processLiveCameraFrame);
+          }
+        } catch (e) {
+          debugPrint('[video upload] camera resume failed: $e');
+        } finally {
+          if (mounted) setState(() => _busy = false);
+        }
+      }
+    }
+  }
+
+  Future<void> _uploadVideo({XFile? recordedVideo}) async {
+    // Select once: later toggle changes do not reroute an in-flight request.
+    if (isOnlineMode) {
+      return _uploadVideoOnline(recordedVideo: recordedVideo);
+    }
+    if (_busy || _recording || _controller.value.isRecordingVideo) return;
+    _invalidateTracking();
+    setState(() {
+      _busy = true;
+      _uploading = true;
+    });
+    try {
+      await _initializeControllerFuture;
+      if (_controller.value.isStreamingImages) {
+        await _controller.stopImageStream();
+      }
+      final uri =
+          recordedVideo?.path ??
+          await const MethodChannel('com.example.signlanguage/video_picker')
+              .invokeMethod<String>('pickVideo');
       await _lifecycle;
       if (!mounted || uri == null) return;
       await _poseService.initialize();
@@ -544,8 +724,11 @@ class _CameraScreenState extends State<CameraScreen>
         ),
       );
       if (mounted && sentence != null && sentence.trim().isNotEmpty) {
-        widget.onRecognitionResult?.call(sentence);
-        widget.onVideoSaved?.call();
+        await Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (_) => CommunicationPage(recognizedText: sentence),
+          ),
+        );
       }
     } catch (e) {
       debugPrint('[video upload] $e');
@@ -577,7 +760,7 @@ class _CameraScreenState extends State<CameraScreen>
     }
   }
 
-  bool _held = false;
+  bool _cancelRecording = false;
 
   bool get _ready => _controller.value.isInitialized;
 
@@ -587,80 +770,12 @@ class _CameraScreenState extends State<CameraScreen>
         .showSnackBar(SnackBar(content: Text('Capture/save failed: $error')));
   }
 
-  void _publish(XFile file, bool isVideo) {
-    if (!mounted) return;
-    widget.onMediaCaptured?.call(file, isVideo);
-    widget.onVideoSaved?.call();
-  }
-
-  Future<void> _analyzeAndPublish(XFile mediaFile, bool isVideo) async {
-    try {
-      final result = await _handDetectorService.analyzeImageFile(
-        mediaFile.path,
-      );
-      for (final log in result.logs) {
-        debugPrint(
-          '[pipeline] ${log.stage}: ${log.details} success=${log.success}',
-        );
-      }
-
-      if (mounted) {
-        setState(() {
-          _hasHand = result.hasHand;
-          _currentLandmarks = result.landmarks;
-          _predictedFingers = result.predictedSign;
-          _predictedLabel = result.predictedLabel;
-        });
-
-        final text = result.hasHand && result.predictedSign >= 0
-            ? '손 동작: ${result.predictedLabel}'
-            : 'No hand detected';
-
-        widget.onRecognitionResult?.call(text);
-      }
-    } catch (e) {
-      debugPrint('Error analyzing captured file: $e');
-    }
-  }
-
-  Future<void> _takePhoto() async {
-    if (_busy || _recording || _controller.value.isRecordingVideo) return;
-    if (!_ready) {
-      _showError('Camera is not ready');
-      return;
-    }
-    _invalidateTracking();
-    setState(() => _busy = true);
-    try {
-      final photo = await _controller.takePicture();
-      unawaited(_checkPhotoFile(photo));
-      unawaited(_savePhotoToGallery(photo));
-
-      await _analyzeAndPublish(photo, false);
-
-      _publish(photo, false);
-    } catch (error) {
-      _showError(error);
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
-  }
-
-  Future<void> _checkPhotoFile(XFile photo) async {
-    try {
-      final bytes = await photo.length();
-      debugPrint('[photo] file size: $bytes bytes, path: ${photo.path}');
-    } catch (error) {
-      debugPrint('[photo] file missing: ${photo.path}; $error');
-    }
-  }
-
-  Future<void> _savePhotoToGallery(XFile photo) async {
-    try {
-      await Gal.putImage(photo.path);
-      debugPrint('[photo] Gallery save success: ${photo.path}');
-    } catch (error) {
-      debugPrint('[photo] Gallery save failure: $error');
+  void _toggleRecording() {
+    if (_busy) return;
+    if (_recording) {
+      unawaited(_stopRecording());
+    } else {
+      unawaited(_startRecording());
     }
   }
 
@@ -670,26 +785,25 @@ class _CameraScreenState extends State<CameraScreen>
       _showError('Camera is not ready');
       return;
     }
-    _held = true;
+    _cancelRecording = false;
     _invalidateTracking();
     setState(() => _busy = true);
     try {
+      if (_controller.value.isStreamingImages) {
+        await _controller.stopImageStream();
+      }
       await _controller.startVideoRecording();
       if (!mounted) return;
       setState(() => _recording = true);
     } catch (error) {
-      _held = false;
       _showError(error);
     } finally {
+      await _resumePreviewAfterRecording();
       if (mounted) setState(() => _busy = false);
     }
-    if (mounted && !_held && _recording) await _stopRecording();
-  }
-
-  void _releaseRecording() {
-    _held = false;
-    if (mounted) setState(() => _pressed = false);
-    if (_recording && !_busy) _stopRecording();
+    if (mounted && _cancelRecording && _recording) {
+      await _stopRecording();
+    }
   }
 
   Future<void> _stopRecording() async {
@@ -700,18 +814,49 @@ class _CameraScreenState extends State<CameraScreen>
       final video = await _controller.stopVideoRecording();
       if (!mounted) return;
       setState(() => _recording = false);
-      await Gal.putVideo(video.path);
-
-      await _analyzeAndPublish(video, true);
-
-      _publish(video, true);
+      if (_cancelRecording || !_foreground) return;
+      if (await video.length() <= 0) {
+        throw StateError('The recording is empty. Please record again.');
+      }
+      if (!mounted || _cancelRecording || !_foreground) return;
+      // Gallery saving is secondary; the captured file remains the input.
+      unawaited(_saveRecordedVideo(video));
+      widget.onMediaCaptured?.call(video, true);
+      setState(() => _busy = false);
+      await _uploadVideo(recordedVideo: video);
     } catch (error) {
       if (mounted) {
         setState(() => _recording = _controller.value.isRecordingVideo);
       }
       _showError(error);
     } finally {
+      await _resumePreviewAfterRecording();
       if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _resumePreviewAfterRecording() async {
+    if (!mounted ||
+        !_foreground ||
+        !_ready ||
+        _recording ||
+        _uploading ||
+        _controller.value.isRecordingVideo ||
+        _controller.value.isStreamingImages) {
+      return;
+    }
+    try {
+      await _controller.startImageStream(_processLiveCameraFrame);
+    } catch (error) {
+      debugPrint('[recording] Preview resume failed: $error');
+    }
+  }
+
+  Future<void> _saveRecordedVideo(XFile video) async {
+    try {
+      await Gal.putVideo(video.path);
+    } catch (error) {
+      debugPrint('[recording] Gallery save failed: $error');
     }
   }
 
@@ -719,7 +864,6 @@ class _CameraScreenState extends State<CameraScreen>
 
   @override
   Widget build(BuildContext context) {
-    final stripHeight = MediaQuery.sizeOf(context).height * 0.075;
     const textShadow = [
       Shadow(color: Color(0x99000000), blurRadius: 5, offset: Offset(0, 1)),
     ];
@@ -748,22 +892,7 @@ class _CameraScreenState extends State<CameraScreen>
                     child: SizedBox(
                       width: 1000 * ratio,
                       height: 1000,
-                      child: Stack(
-                        fit: StackFit.expand,
-                        children: [
-                          CameraPreview(_controller),
-                          IgnorePointer(
-                            child: CustomPaint(
-                              painter: TrackingPainter(
-                                _busy || _recording || !_foreground || !_visible
-                                    ? null
-                                    : _trackingFrame,
-                                debugFacePoints: _debugFacePoints,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
+                      child: CameraPreview(_controller),
                     ),
                   ),
                 );
@@ -771,42 +900,10 @@ class _CameraScreenState extends State<CameraScreen>
             ),
           ),
           Positioned.fill(
-            bottom: stripHeight + 132,
+            bottom: MediaQuery.paddingOf(context).bottom + 220,
             child: SafeArea(
               child: IgnorePointer(
                 child: CustomPaint(painter: _ViewfinderGuides()),
-              ),
-            ),
-          ),
-          if (_poseService.error != null)
-            Positioned(
-              left: 16,
-              right: 16,
-              bottom: stripHeight + 140,
-              child: IgnorePointer(
-                child: Text(
-                  _poseService.error!,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    shadows: textShadow,
-                  ),
-                ),
-              ),
-            ),
-          // Compact status panel; detailed pipeline logs remain in the console.
-          Positioned(
-            left: 16,
-            top: 80,
-            child: SafeArea(
-              child: DebugOverlay(
-                faceLandmarkCount: _trackingFrame?.face.length ?? 0,
-                faceDots: _debugFacePoints,
-                onToggleFaceDots: () =>
-                    setState(() => _debugFacePoints = !_debugFacePoints),
-                hasHand: _hasHand,
-                landmarkCount: _currentLandmarks?.length ?? 0,
-                fps: _trackingFps,
-                fingerCount: _predictedFingers,
               ),
             ),
           ),
@@ -817,17 +914,6 @@ class _CameraScreenState extends State<CameraScreen>
                 padding: const EdgeInsets.fromLTRB(24, 16, 24, 0),
                 child: Row(
                   children: [
-                    const Flexible(
-                      child: Text(
-                        'KEYPOINT CLASSIFIER',
-                        style: TextStyle(
-                          color: Color(0xFF6A818C),
-                          fontSize: 12,
-                          letterSpacing: 2.5,
-                          shadows: textShadow,
-                        ),
-                      ),
-                    ),
                     const Spacer(),
                     FilledButton.tonalIcon(
                       label: const Text('Upload'),
@@ -874,139 +960,137 @@ class _CameraScreenState extends State<CameraScreen>
           Positioned(
             left: 16,
             right: 16,
-            bottom: stripHeight + 16,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Semantics(
-                  liveRegion: true,
-                  child: Text(
-                    _busy
-                        ? '분석 중…'
-                        : _recording
-                        ? '녹화 중'
-                        : _hasHand && _predictedFingers >= 0
-                        ? '손 동작: $_predictedLabel'
-                        : '손 동작을 보여주세요',
+            bottom: 24,
+            child: SafeArea(
+              top: false,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text(
+                    '수어를 보여주세요',
                     textAlign: TextAlign.center,
-                    style: const TextStyle(
+                    style: TextStyle(
                       color: Colors.white,
                       fontSize: 20,
                       fontWeight: FontWeight.w600,
                       shadows: textShadow,
                     ),
                   ),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  _hasHand && _predictedFingers >= 0
-                      ? 'Detected Sign: $_predictedLabel'
-                      : 'Pointing / Close / Open',
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 12,
-                    shadows: textShadow,
-                  ),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  _busy
-                      ? '이미지 분석 및 결과 생성 중...'
-                      : _recording
-                      ? '손을 떼면 녹화가 종료됩니다'
-                      : '탭하여 촬영/분석 · 길게 눌러 녹화',
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 14,
-                    shadows: textShadow,
-                  ),
-                ),
-                const SizedBox(height: 24),
-                Semantics(
-                  button: true,
-                  enabled: !_busy,
-                  label: _recording
-                      ? 'Release to stop recording'
-                      : 'Take photo or hold to record',
-                  child: AnimatedScale(
-                    scale: _pressed ? 0.94 : 1,
-                    duration: const Duration(milliseconds: 120),
-                    child: Container(
-                      width: 96,
-                      height: 96,
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        shape: BoxShape.circle,
-                        border: Border.all(
-                          color: const Color(0xFF46565D),
-                          width: 1,
-                        ),
-                      ),
-                      child: Material(
-                        color: Colors.transparent,
-                        shape: const CircleBorder(),
-                        child: GestureDetector(
-                          key: const Key('recordButton'),
-                          behavior: HitTestBehavior.opaque,
-                          onTapDown: (_) => setState(() => _pressed = true),
-                          onTapUp: (_) => setState(() => _pressed = false),
-                          onTapCancel: () => setState(() => _pressed = false),
-                          onTap: _takePhoto,
-                          onLongPressStart: (_) => _startRecording(),
-                          onLongPressEnd: (_) => _releaseRecording(),
-                          onLongPressCancel: _releaseRecording,
-                          child: Center(
-                            child: _busy
-                                ? const SizedBox(
-                                    width: 36,
-                                    height: 36,
-                                    child: CircularProgressIndicator(
-                                      key: Key('recordLoading'),
-                                      strokeWidth: 2,
-                                      color: Color(0xFF46565D),
-                                    ),
-                                  )
-                                : Container(
-                                    key: const Key('recordShape'),
-                                    width: _recording ? 32 : 66,
-                                    height: _recording ? 32 : 66,
+                  const SizedBox(height: 24),
+                  LayoutBuilder(
+                    builder: (context, constraints) {
+                      final pillWidth = ((constraints.maxWidth - 96) / 2 - 12)
+                          .clamp(0.0, 96.0);
+                      return SizedBox(
+                        height: 96,
+                        child: Stack(
+                          alignment: Alignment.center,
+                          children: [
+                            Center(
+                              child: Semantics(
+                                button: true,
+                                enabled: !_busy,
+                                label: _recording
+                                    ? 'Stop recording'
+                                    : 'Start recording',
+                                child: AnimatedScale(
+                                  scale: _pressed ? 0.94 : 1,
+                                  duration: const Duration(milliseconds: 120),
+                                  child: Container(
+                                    width: 96,
+                                    height: 96,
                                     decoration: BoxDecoration(
-                                      color: const Color(0xFFEE7B6E),
-                                      borderRadius: BorderRadius.circular(
-                                        _recording ? 8 : 40,
-                                      ),
+                                      color: Colors.white,
+                                      shape: BoxShape.circle,
                                       border: Border.all(
-                                        color: const Color(0xFFBA625B),
-                                        width: 2,
+                                        color: const Color(0xFF46565D),
+                                        width: 1,
+                                      ),
+                                    ),
+                                    child: Material(
+                                      color: Colors.transparent,
+                                      shape: const CircleBorder(),
+                                      child: GestureDetector(
+                                        key: const Key('recordButton'),
+                                        behavior: HitTestBehavior.opaque,
+                                        onTapDown: (_) =>
+                                            setState(() => _pressed = true),
+                                        onTapUp: (_) =>
+                                            setState(() => _pressed = false),
+                                        onTapCancel: () =>
+                                            setState(() => _pressed = false),
+                                        onTap: _toggleRecording,
+                                        child: Center(
+                                          child: _busy
+                                              ? const SizedBox(
+                                                  width: 36,
+                                                  height: 36,
+                                                  child:
+                                                      CircularProgressIndicator(
+                                                        key: Key(
+                                                          'recordLoading',
+                                                        ),
+                                                        strokeWidth: 2,
+                                                        color: Color(
+                                                          0xFF46565D,
+                                                        ),
+                                                      ),
+                                                )
+                                              : Container(
+                                                  key: const Key('recordShape'),
+                                                  width: _recording ? 32 : 66,
+                                                  height: _recording ? 32 : 66,
+                                                  decoration: BoxDecoration(
+                                                    color: const Color(
+                                                      0xFFEE7B6E,
+                                                    ),
+                                                    borderRadius:
+                                                        BorderRadius.circular(
+                                                          _recording ? 8 : 40,
+                                                        ),
+                                                    border: Border.all(
+                                                      color: const Color(
+                                                        0xFFBA625B,
+                                                      ),
+                                                      width: 2,
+                                                    ),
+                                                  ),
+                                                ),
+                                        ),
                                       ),
                                     ),
                                   ),
-                          ),
+                                ),
+                              ),
+                            ),
+                            Positioned(
+                              right: 0,
+                              width: pillWidth,
+                              top: 24,
+                              height: 48,
+                              child: TranslationModePill(
+                                isOnlineMode: isOnlineMode,
+                                onChanged: (value) =>
+                                    setState(() => isOnlineMode = value),
+                              ),
+                            ),
+                          ],
                         ),
-                      ),
+                      );
+                    },
+                  ),
+                  const SizedBox(height: 10),
+                  const Text(
+                    '녹화',
+                    key: Key('recordLabel'),
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 14,
+                      shadows: textShadow,
                     ),
                   ),
-                ),
-              ],
-            ),
-          ),
-          Positioned(
-            left: 0,
-            right: 0,
-            bottom: 0,
-            height: stripHeight,
-            child: const ColoredBox(
-              color: Color(0xFFF4F6F3),
-              child: SafeArea(
-                top: false,
-                child: Center(
-                  child: Text(
-                    'Keypoint Classifier: Pointing / Close / Open',
-                    style: TextStyle(color: Color(0xFF46565D), fontSize: 12),
-                  ),
-                ),
+                ],
               ),
             ),
           ),
