@@ -64,7 +64,7 @@ class VideoPredictionClient implements VideoPredictionApi {
     }
     if (apiToken.trim().isEmpty) {
       throw const VideoPredictionException(
-        'The API token is not configured. Add it to your local config/dev.json file.',
+        'The API token is not configured. Enter it in API settings.',
       );
     }
 
@@ -88,6 +88,8 @@ class VideoPredictionClient implements VideoPredictionApi {
         HttpHeaders.authorizationHeader: 'Bearer ${apiToken.trim()}',
         HttpHeaders.contentTypeHeader: 'application/octet-stream',
       });
+    request.headers[HttpHeaders.authorizationHeader] =
+        'Bearer ${apiToken.trim()}';
 
     var sent = 0;
     final response = await _sendAndRead(request, videoBytes, (chunkSize) {

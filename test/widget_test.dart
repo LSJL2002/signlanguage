@@ -6,6 +6,23 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:signlanguage/history.dart';
 import 'package:signlanguage/main.dart';
+import 'package:signlanguage/services/api_settings.dart';
+import 'package:signlanguage/services/video_prediction_api.dart';
+
+class _MemoryApiSettingsStore implements ApiSettingsStore {
+  ApiSettings settings = const ApiSettings(
+    baseUrl: configuredApiBaseUrl,
+    apiToken: configuredApiToken,
+  );
+
+  @override
+  Future<ApiSettings> read() async => settings;
+
+  @override
+  Future<void> write(ApiSettings value) async {
+    settings = value;
+  }
+}
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -111,10 +128,42 @@ void main() {
   ) async {
     cameras = [];
     final before = recognitionHistory.records.length;
-    await tester.pumpWidget(const MyApp());
+    await tester.pumpWidget(MyApp(settingsStore: _MemoryApiSettingsStore()));
     expect(find.text('No cameras found on this device'), findsOneWidget);
     expect(find.byType(CommunicationPage), findsNothing);
     expect(recognitionHistory.records.length, before);
+  });
+
+  testWidgets('API settings are saved and applied to the camera', (
+    tester,
+  ) async {
+    final settingsStore = _MemoryApiSettingsStore();
+    await tester.pumpWidget(MyApp(settingsStore: settingsStore));
+    await tester.pump(const Duration(seconds: 2));
+
+    await tester.tap(find.byTooltip('API settings'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.enterText(
+      find.byKey(const Key('apiBaseUrlField')),
+      'https://prediction.example/api/',
+    );
+    await tester.enterText(
+      find.byKey(const Key('apiTokenField')),
+      'updated-test-token',
+    );
+    await tester.tap(find.text('Save'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(settingsStore.settings.baseUrl, 'https://prediction.example/api');
+    expect(settingsStore.settings.apiToken, 'updated-test-token');
+    final camera = tester.widget<CameraScreen>(find.byType(CameraScreen));
+    expect(camera.apiBaseUrl, settingsStore.settings.baseUrl);
+    expect(camera.apiToken, settingsStore.settings.apiToken);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump();
   });
 
   testWidgets('capture, result, History and retry reuse the original camera', (
@@ -122,7 +171,7 @@ void main() {
   ) async {
     final before = recognitionHistory.records.length;
     final started = DateTime.now();
-    await tester.pumpWidget(const MyApp());
+    await tester.pumpWidget(MyApp(settingsStore: _MemoryApiSettingsStore()));
     await tester.pumpAndSettle();
     expect(find.byType(CameraPreview), findsOneWidget);
     final cameraState = tester.state(find.byType(CameraScreen));
@@ -142,7 +191,7 @@ void main() {
         recognitionHistory.records.first.timestamp.isBefore(started),
         isFalse,
       );
-      await tester.pumpWidget(const MyApp());
+      await tester.pumpWidget(MyApp(settingsStore: _MemoryApiSettingsStore()));
       await tester.pumpAndSettle();
       expect(recognitionHistory.records.length, before + count);
       await tester.tap(find.byTooltip('기록 / History'));
@@ -183,7 +232,7 @@ void main() {
     tester.view.physicalSize = const Size(320, 568);
     addTearDown(tester.view.resetDevicePixelRatio);
     addTearDown(tester.view.resetPhysicalSize);
-    await tester.pumpWidget(const MyApp());
+    await tester.pumpWidget(MyApp(settingsStore: _MemoryApiSettingsStore()));
     await tester.pumpAndSettle();
     final button = find.byKey(const Key('recordButton'));
     expect(tester.getCenter(button).dx, 160);
@@ -250,7 +299,7 @@ void main() {
   testWidgets('active recording rejects photo and second start', (
     tester,
   ) async {
-    await tester.pumpWidget(const MyApp());
+    await tester.pumpWidget(MyApp(settingsStore: _MemoryApiSettingsStore()));
     await tester.pumpAndSettle();
     final button = find.byKey(const Key('recordButton'));
     final hold = await tester.startGesture(tester.getCenter(button));
@@ -273,7 +322,7 @@ void main() {
     tester,
   ) async {
     denyCamera = true;
-    await tester.pumpWidget(const MyApp());
+    await tester.pumpWidget(MyApp(settingsStore: _MemoryApiSettingsStore()));
     await tester.pumpAndSettle();
     expect(find.text('Camera unavailable'), findsOneWidget);
     await tester.tap(find.byKey(const Key('recordButton')));
@@ -289,7 +338,7 @@ void main() {
     (tester) async {
       saveGate = Completer<void>();
       final before = recognitionHistory.records.length;
-      await tester.pumpWidget(const MyApp());
+      await tester.pumpWidget(MyApp(settingsStore: _MemoryApiSettingsStore()));
       await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('recordButton')));
       await tester.pumpAndSettle();
@@ -338,7 +387,7 @@ void main() {
       failCapture = failure == 'capture';
       failSave = failure == 'save';
       final before = recognitionHistory.records.length;
-      await tester.pumpWidget(const MyApp());
+      await tester.pumpWidget(MyApp(settingsStore: _MemoryApiSettingsStore()));
       await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('recordButton')));
       await tester.pumpAndSettle();

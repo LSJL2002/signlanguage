@@ -13,7 +13,9 @@ import 'services/hand_detector_service.dart';
 import 'widgets/debug_overlay.dart';
 import 'services/pose_service.dart';
 import 'widgets/pose_painter.dart';
+import 'services/api_settings.dart';
 import 'services/video_prediction_api.dart';
+import 'widgets/api_settings_dialog.dart';
 
 final trackingRouteObserver = RouteObserver<ModalRoute<void>>();
 List<CameraDescription> cameras = [];
@@ -30,7 +32,9 @@ Future<void> main() async {
 }
 
 class MyApp extends StatefulWidget {
-  const MyApp({super.key});
+  const MyApp({super.key, this.settingsStore});
+
+  final ApiSettingsStore? settingsStore;
 
   @override
   State<MyApp> createState() => _MyAppState();
@@ -38,10 +42,65 @@ class MyApp extends StatefulWidget {
 
 class _MyAppState extends State<MyApp> {
   String _lastRecognizedText = mockRecognizedText;
+  late final ApiSettingsStore _settingsStore;
+  ApiSettings _apiSettings = const ApiSettings(
+    baseUrl: configuredApiBaseUrl,
+    apiToken: configuredApiToken,
+  );
+  final _scaffoldMessengerKey = GlobalKey<ScaffoldMessengerState>();
+
+  @override
+  void initState() {
+    super.initState();
+    _settingsStore = widget.settingsStore ?? const SecureApiSettingsStore();
+    unawaited(_loadApiSettings());
+  }
+
+  Future<void> _loadApiSettings() async {
+    try {
+      final settings = await _settingsStore.read();
+      if (mounted) setState(() => _apiSettings = settings);
+    } catch (error, stackTrace) {
+      debugPrint('Could not load saved API settings: $error\n$stackTrace');
+      if (mounted) _showSettingsMessage('Could not load saved API settings.');
+    }
+  }
+
+  Future<void> _editApiSettings(BuildContext context) async {
+    final settings = await showDialog<ApiSettings>(
+      context: context,
+      builder: (context) => ApiSettingsDialog(settings: _apiSettings),
+    );
+    if (settings == null) return;
+
+    try {
+      await _settingsStore.write(settings);
+      if (!mounted) return;
+      setState(() => _apiSettings = settings);
+      _showSettingsMessage('API settings saved securely.');
+    } catch (error, stackTrace) {
+      debugPrint('Could not save API settings: $error\n$stackTrace');
+      if (mounted) _showSettingsMessage('Could not save API settings.');
+    }
+  }
+
+  void _showSettingsMessage(String message) {
+    final messenger = _scaffoldMessengerKey.currentState;
+    if (messenger == null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _showSettingsMessage(message);
+      });
+      return;
+    }
+    messenger
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
+  }
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
+      scaffoldMessengerKey: _scaffoldMessengerKey,
       debugShowCheckedModeBanner: false,
       navigatorObservers: [trackingRouteObserver],
       title: 'Lanying',
@@ -73,7 +132,16 @@ class _MyAppState extends State<MyApp> {
         builder: (context) {
           if (cameras.isEmpty) {
             return Scaffold(
-              appBar: AppBar(actions: const [HistoryButton()]),
+              appBar: AppBar(
+                actions: [
+                  IconButton(
+                    tooltip: 'API settings',
+                    onPressed: () => _editApiSettings(context),
+                    icon: const Icon(Icons.settings_outlined),
+                  ),
+                  const HistoryButton(),
+                ],
+              ),
               body: const Center(
                 child: Text('No cameras found on this device'),
               ),
@@ -81,6 +149,9 @@ class _MyAppState extends State<MyApp> {
           }
           return CameraScreen(
             cameras: cameras,
+            apiBaseUrl: _apiSettings.baseUrl,
+            apiToken: _apiSettings.apiToken,
+            onConfigureApi: () => _editApiSettings(context),
             onMediaCaptured: (file, isVideo) {
               if (!isVideo) {
                 debugPrint('[photo] onMediaCaptured received: ${file.path}');
@@ -282,6 +353,9 @@ class CameraScreen extends StatefulWidget {
   final VoidCallback? onVideoSaved;
   final void Function(XFile file, bool isVideo)? onMediaCaptured;
   final void Function(String recognizedText)? onRecognitionResult;
+  final String apiBaseUrl;
+  final String apiToken;
+  final VoidCallback? onConfigureApi;
 
   const CameraScreen({
     super.key,
@@ -289,6 +363,9 @@ class CameraScreen extends StatefulWidget {
     this.onVideoSaved,
     this.onMediaCaptured,
     this.onRecognitionResult,
+    this.apiBaseUrl = configuredApiBaseUrl,
+    this.apiToken = configuredApiToken,
+    this.onConfigureApi,
   });
 
   @override
@@ -299,10 +376,6 @@ class _CameraScreenState extends State<CameraScreen>
     with WidgetsBindingObserver, RouteAware {
   late CameraController _controller;
   late Future<void> _initializeControllerFuture;
-  final VideoPredictionClient _predictionClient = VideoPredictionClient(
-    baseUrl: configuredApiBaseUrl,
-    apiToken: configuredApiToken,
-  );
 
   final HandDetectorService _handDetectorService = HandDetectorService();
 
@@ -512,7 +585,6 @@ class _CameraScreenState extends State<CameraScreen>
     }
     _handDetectorService.close();
     unawaited(_poseService.close());
-    _predictionClient.close();
     _controller.dispose();
     super.dispose();
   }
@@ -551,6 +623,10 @@ class _CameraScreenState extends State<CameraScreen>
             waiting: false,
           ));
       var progressDialogOpen = true;
+      final predictionClient = VideoPredictionClient(
+        baseUrl: widget.apiBaseUrl,
+        apiToken: widget.apiToken,
+      );
       unawaited(
         showDialog<void>(
           context: context,
@@ -597,7 +673,7 @@ class _CameraScreenState extends State<CameraScreen>
         ),
       );
       try {
-        final result = await _predictionClient.predict(
+        final result = await predictionClient.predict(
           video.readAsByteStream(),
           size: size,
           onProgress: (sent, total) {
@@ -617,6 +693,7 @@ class _CameraScreenState extends State<CameraScreen>
           ),
         );
       } finally {
+        predictionClient.close();
         uploadProgress.dispose();
         if (progressDialogOpen && mounted) {
           progressDialogOpen = false;
@@ -963,6 +1040,16 @@ class _CameraScreenState extends State<CameraScreen>
                             ),
                           ),
                         ),
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: 'API settings',
+                      onPressed: _busy || _recording
+                          ? null
+                          : widget.onConfigureApi,
+                      icon: const Icon(
+                        Icons.settings_outlined,
+                        color: Color(0xFF46565D),
                       ),
                     ),
                   ],

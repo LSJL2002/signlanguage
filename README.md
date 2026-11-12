@@ -5,11 +5,15 @@ camera screen to choose a video, upload its raw bytes to `POST /predict`, and
 display only the returned Korean sentence. Uploads use
 `application/octet-stream` and are limited to 90 MiB.
 
-## Local API configuration
+## API configuration
 
-Copy `config/dev.json.example` to `config/dev.json`, then replace the
-placeholder API token with your local token. The development file is excluded
-from Git.
+On the home screen, tap the settings icon to enter the API base URL and token.
+The app stores these values securely on the device and uses them for subsequent
+video predictions.
+
+For development, you can optionally provide initial values with
+`config/dev.json`. Copy the example and replace the placeholder API token. The
+development file is excluded from Git.
 
 ```json
 {
@@ -25,16 +29,16 @@ Copy-Item config/dev.json.example config/dev.json
 notepad config/dev.json
 ```
 
-The URL is configurable and defaults to the current tunnel URL. Use the local
-file when running the app:
+The URL defaults to the current tunnel URL. Use the local file when running
+the app:
 
 ```powershell
 flutter run --dart-define-from-file=config/dev.json
 ```
 
-You can also configure `API_BASE_URL` and `API_TOKEN` with individual
-`--dart-define` values. If the token is not configured, the app asks you to
-configure it before uploading.
+You can also provide `API_BASE_URL` and `API_TOKEN` with individual
+`--dart-define` values. Values saved from the home screen take precedence over
+these startup defaults.
 
 **Security:** A token compiled into a distributed mobile app can be extracted.
 Do not use a long-lived or privileged API token in a production app. Use a
