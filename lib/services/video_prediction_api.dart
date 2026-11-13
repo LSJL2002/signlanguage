@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/services.dart';
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:http/http.dart' as http;
 
 const defaultApiBaseUrl =
@@ -96,11 +97,22 @@ class VideoPredictionClient implements VideoPredictionApi {
     });
 
     if (response.statusCode < 200 || response.statusCode >= 300) {
+      debugPrint('KSL_ONLINE HTTP error status=${response.statusCode}');
       throw _errorForStatus(response.statusCode);
     }
 
     try {
       final decoded = jsonDecode(response.body);
+      // Temporary diagnostics: never log response text, headers, or config.
+      final fields = decoded is Map<String, dynamic> ? decoded : null;
+      final sentence = fields?['sentence'];
+      final glosses = fields?['glosses'];
+      debugPrint(
+        'KSL_ONLINE hasSentence=${fields?.containsKey('sentence') ?? false} '
+        'hasGlosses=${fields?.containsKey('glosses') ?? false} '
+        'sentenceTrimmedLength=${sentence is String ? sentence.trim().length : null} '
+        'glossesTrimmedLength=${glosses is String ? glosses.trim().length : null}',
+      );
       if (decoded is! Map<String, dynamic> ||
           decoded['glosses'] is! String ||
           decoded['sentence'] is! String) {
@@ -111,6 +123,7 @@ class VideoPredictionClient implements VideoPredictionApi {
         sentence: decoded['sentence'] as String,
       );
     } on FormatException {
+      debugPrint('KSL_ONLINE parsing error: invalid JSON or response schema');
       throw const VideoPredictionException(
         'The prediction could not be read. Please try again.',
       );
@@ -133,32 +146,39 @@ class VideoPredictionClient implements VideoPredictionApi {
         );
         await request.sink.close();
         final response = await responseFuture;
+        debugPrint('KSL_ONLINE HTTP status=${response.statusCode}');
         return (
           statusCode: response.statusCode,
           body: await response.stream.bytesToString(),
         );
       })().timeout(_requestTimeout);
     } on TimeoutException {
+      debugPrint('KSL_ONLINE request error: TimeoutException');
       throw const VideoPredictionException(
         'The upload or prediction took too long. Check your connection and try again.',
       );
     } on SocketException {
+      debugPrint('KSL_ONLINE request error: SocketException');
       throw const VideoPredictionException(
         'Could not connect to the prediction service. Check your internet connection and try again.',
       );
     } on HandshakeException {
+      debugPrint('KSL_ONLINE request error: HandshakeException');
       throw const VideoPredictionException(
         'A secure connection could not be established. Check your internet connection and try again.',
       );
     } on http.ClientException {
+      debugPrint('KSL_ONLINE request error: http.ClientException');
       throw const VideoPredictionException(
         'Could not connect to the prediction service. Check your internet connection and try again.',
       );
     } on FileSystemException {
+      debugPrint('KSL_ONLINE request error: FileSystemException');
       throw const VideoPredictionException(
         'The selected video could not be read. Choose it again and try once more.',
       );
     } on PlatformException {
+      debugPrint('KSL_ONLINE request error: PlatformException');
       throw const VideoPredictionException(
         'The selected video could not be read. Choose it again and try once more.',
       );
