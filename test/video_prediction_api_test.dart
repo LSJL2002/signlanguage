@@ -118,17 +118,21 @@ void main() {
     },
   );
 
-  test('requires a configured API token', () async {
+  test('allows an optional API key without an Authorization header', () async {
     final api = VideoPredictionClient(
       baseUrl: 'https://example.com',
       apiToken: '',
-      client: MockClient((request) async => http.Response('{}', 200)),
+      client: MockClient((request) async {
+        expect(request.headers.containsKey('authorization'), isFalse);
+        return http.Response('{"glosses":"HELLO","sentence":"Hello"}', 200);
+      }),
     );
-
-    await expectLater(
-      api.predict(video.openRead(), size: 4, onProgress: (sent, total) {}),
-      throwsA(isA<VideoPredictionException>()),
+    final result = await api.predict(
+      video.openRead(),
+      size: 4,
+      onProgress: (sent, total) {},
     );
+    expect(result.sentence, 'Hello');
     api.close();
   });
 

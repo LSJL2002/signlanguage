@@ -12,6 +12,8 @@ import 'visual_style.dart';
 import 'services/hand_detector_service.dart';
 import 'widgets/translation_mode_pill.dart';
 import 'services/video_prediction_api.dart';
+import 'services/online_api_settings.dart';
+import 'online_api_settings_page.dart';
 import 'services/pose_service.dart';
 import 'video_analysis_page.dart';
 
@@ -144,7 +146,9 @@ class _CommunicationPageState extends State<CommunicationPage> {
 
   @override
   Widget build(BuildContext context) {
-    debugPrint('KSL_RESULT_UI chars=${widget.recognizedText.length} text=${widget.recognizedText}');
+    debugPrint(
+      'KSL_RESULT_UI chars=${widget.recognizedText.length} text=${widget.recognizedText}',
+    );
     return Scaffold(
       body: Stack(
         fit: StackFit.expand,
@@ -303,10 +307,7 @@ class _CameraScreenState extends State<CameraScreen>
     with WidgetsBindingObserver, RouteAware {
   late CameraController _controller;
   late Future<void> _initializeControllerFuture;
-  final VideoPredictionClient _predictionClient = VideoPredictionClient(
-    baseUrl: configuredApiBaseUrl,
-    apiToken: configuredApiToken,
-  );
+  VideoPredictionClient? _predictionClient;
 
   final HandDetectorService _handDetectorService = HandDetectorService();
 
@@ -523,7 +524,7 @@ class _CameraScreenState extends State<CameraScreen>
     }
     _handDetectorService.close();
     unawaited(_poseService.close());
-    _predictionClient.close();
+    _predictionClient?.close();
     _controller.dispose();
     super.dispose();
   }
@@ -540,6 +541,15 @@ class _CameraScreenState extends State<CameraScreen>
       _uploading = true;
     });
     try {
+      if (widget.predictionApi == null) {
+        final settings = await const OnlineApiSettingsStore().load();
+        if (!mounted) return;
+        _predictionClient?.close();
+        _predictionClient = VideoPredictionClient(
+          baseUrl: settings.serverUrl,
+          apiToken: settings.apiKey,
+        );
+      }
       await _initializeControllerFuture;
       if (_controller.value.isStreamingImages) {
         await _controller.stopImageStream();
@@ -612,7 +622,7 @@ class _CameraScreenState extends State<CameraScreen>
         ),
       );
       try {
-        final result = await (widget.predictionApi ?? _predictionClient)
+        final result = await (widget.predictionApi ?? _predictionClient!)
             .predict(
               recordedVideo?.openRead() ?? pickedVideo!.readAsByteStream(),
               size: size,
@@ -951,6 +961,18 @@ class _CameraScreenState extends State<CameraScreen>
                           ),
                         ),
                       ),
+                    ),
+                    const SizedBox(width: 8),
+                    IconButton.filledTonal(
+                      tooltip: 'Online API Settings',
+                      onPressed: _busy || _recording
+                          ? null
+                          : () => Navigator.of(context).push(
+                              MaterialPageRoute<void>(
+                                builder: (_) => const OnlineApiSettingsPage(),
+                              ),
+                            ),
+                      icon: const Icon(Icons.settings_outlined),
                     ),
                   ],
                 ),

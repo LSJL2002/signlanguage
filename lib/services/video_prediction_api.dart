@@ -63,11 +63,6 @@ class VideoPredictionClient implements VideoPredictionApi {
         'This video is larger than the 90 MiB upload limit. Choose a smaller video.',
       );
     }
-    if (apiToken.trim().isEmpty) {
-      throw const VideoPredictionException(
-        'The API token is not configured. Add it to your local config/dev.json file.',
-      );
-    }
 
     late final Uri endpoint;
     try {
@@ -86,7 +81,8 @@ class VideoPredictionClient implements VideoPredictionApi {
     final request = http.StreamedRequest('POST', endpoint)
       ..contentLength = size
       ..headers.addAll({
-        HttpHeaders.authorizationHeader: 'Bearer ${apiToken.trim()}',
+        if (apiToken.trim().isNotEmpty)
+          HttpHeaders.authorizationHeader: 'Bearer ${apiToken.trim()}',
         HttpHeaders.contentTypeHeader: 'application/octet-stream',
       });
 
