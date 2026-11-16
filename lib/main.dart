@@ -174,48 +174,31 @@ class _CommunicationPageState extends State<CommunicationPage> {
                     ],
                   ),
                   Expanded(
-                    child: LayoutBuilder(
-                      builder: (context, constraints) {
-                        final compact = constraints.maxHeight < 340;
-                        return Column(
-                          children: [
-                            const Spacer(flex: 5),
-                            const Text(
-                              '인식 결과',
-                              style: TextStyle(
-                                color: AppPalette.muted,
-                                fontSize: 12,
-                                letterSpacing: 2,
-                              ),
+                    child: Column(
+                      children: [
+                        const Spacer(flex: 5),
+                        const Text(
+                          '인식 결과',
+                          style: TextStyle(
+                            color: AppPalette.muted,
+                            fontSize: 12,
+                            letterSpacing: 2,
+                          ),
+                        ),
+                        const SizedBox(height: 20),
+                        Expanded(
+                          flex: 4,
+                          child: ConstrainedBox(
+                            constraints: const BoxConstraints(
+                              maxWidth: 660,
                             ),
-                            const SizedBox(height: 20),
-                            Expanded(
-                              flex: 4,
-                              child: ConstrainedBox(
-                                constraints: const BoxConstraints(
-                                  maxWidth: 660,
-                                ),
-                                child: AdaptiveTranslationText(
-                                  text: widget.recognizedText,
-                                ),
-                              ),
+                            child: AdaptiveTranslationText(
+                              text: widget.recognizedText,
                             ),
-                            SizedBox(height: compact ? 16 : 44),
-                            _CircleButton(
-                              label: '번역 문장 듣기',
-                              light: true,
-                              size: compact ? 64 : 104,
-                              onPressed: () {},
-                              child: Icon(
-                                Icons.volume_up_rounded,
-                                size: compact ? 32 : 48,
-                                color: AppPalette.ink,
-                              ),
-                            ),
-                            const Spacer(flex: 3),
-                          ],
-                        );
-                      },
+                          ),
+                        ),
+                        const Spacer(flex: 3),
+                      ],
                     ),
                   ),
                   TextButton.icon(
@@ -244,22 +227,18 @@ class _CircleButton extends StatelessWidget {
     required this.label,
     required this.child,
     required this.onPressed,
-    this.size = 48,
-    this.light = false,
   });
   final String label;
   final Widget child;
   final VoidCallback onPressed;
-  final double size;
-  final bool light;
 
   @override
   Widget build(BuildContext context) => Semantics(
     label: label,
     button: true,
     child: Container(
-      width: size,
-      height: size,
+      width: 48,
+      height: 48,
       decoration: const BoxDecoration(
         shape: BoxShape.circle,
         boxShadow: [

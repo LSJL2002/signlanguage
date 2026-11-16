@@ -368,6 +368,8 @@ void main() {
       ),
     );
     expect(find.bySemanticsLabel('테스트 결과'), findsOneWidget);
+    expect(find.byIcon(Icons.volume_up_rounded), findsNothing);
+    expect(find.bySemanticsLabel('번역 문장 듣기'), findsNothing);
     expect(find.text('다시 하기 / Try Again').hitTestable(), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
