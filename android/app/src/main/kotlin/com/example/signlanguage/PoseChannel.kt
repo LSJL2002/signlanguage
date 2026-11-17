@@ -19,6 +19,8 @@ import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.StandardMethodCodec
 import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.FileInputStream
 
 /** Dedicated serial background queue: pose inference never blocks the UI thread. */
 class PoseChannel(context: Context, messenger: BinaryMessenger) {
@@ -95,20 +97,32 @@ class PoseChannel(context: Context, messenger: BinaryMessenger) {
                             val retriever = MediaMetadataRetriever()
                             try {
                                 val uri = Uri.parse(requireNotNull(call.argument<String>("uri")))
-                                require(uri.scheme == "content") { "Select a video using the document picker" }
                                 var name: String? = null
                                 var size: Long? = null
-                                context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use { cursor ->
-                                    if (cursor.moveToFirst()) {
-                                        val ni = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                                        val si = cursor.getColumnIndex(OpenableColumns.SIZE)
-                                        if (ni >= 0 && !cursor.isNull(ni)) name = cursor.getString(ni)
-                                        if (si >= 0 && !cursor.isNull(si)) size = cursor.getLong(si)
+                                when (uri.scheme) {
+                                    "content" -> {
+                                        context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+                                            if (cursor.moveToFirst()) {
+                                                val ni = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                                                val si = cursor.getColumnIndex(OpenableColumns.SIZE)
+                                                if (ni >= 0 && !cursor.isNull(ni)) name = cursor.getString(ni)
+                                                if (si >= 0 && !cursor.isNull(si)) size = cursor.getLong(si)
+                                            }
+                                        }
+                                        // Preserve picker grants; do not derive a gallery filesystem path.
+                                        retriever.setDataSource(context, uri)
                                     }
+                                    null, "file" -> {
+                                        val file = File(requireNotNull(uri.path)).canonicalFile
+                                        require(file.isAbsolute && file.isFile && file.canRead()) { "Recorded video is missing or unreadable" }
+                                        require(file.length() > 0) { "Recorded video is empty" }
+                                        name = file.name
+                                        size = file.length()
+                                        FileInputStream(file).use { retriever.setDataSource(it.fd) }
+                                    }
+                                    else -> throw IllegalArgumentException("Unsupported video reference: ${uri.scheme}")
                                 }
-                                Log.i("KSL_VIDEO_PICK", "KSL_VIDEO_PICK uri=$uri name=$name extension=${name?.substringAfterLast('.', "")} size=$size content=${uri.scheme == "content"}")
-                                // ContentResolver grants are used directly; never derive a gallery file path.
-                                retriever.setDataSource(context, uri)
+                                Log.i("KSL_VIDEO_PICK", "KSL_VIDEO_PICK uri=$uri name=$name size=$size content=${uri.scheme == "content"}")
                                 Log.i("KSL_VIDEO_PICK", "KSL_VIDEO_PICK accessibleViaAndroid=true uri=$uri")
                                 videoStage = "read metadata"
                                 fun meta(key: Int) = retriever.extractMetadata(key)
@@ -120,7 +134,7 @@ class PoseChannel(context: Context, messenger: BinaryMessenger) {
                                     "width" to meta(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH),
                                     "height" to meta(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT),
                                     "rotation" to meta(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION),
-                                    "mimeType" to (context.contentResolver.getType(uri) ?: meta(MediaMetadataRetriever.METADATA_KEY_MIMETYPE)),
+                                    "mimeType" to ((if (uri.scheme == "content") context.contentResolver.getType(uri) else null) ?: meta(MediaMetadataRetriever.METADATA_KEY_MIMETYPE)),
                                     "frameRate" to meta(MediaMetadataRetriever.METADATA_KEY_CAPTURE_FRAMERATE),
                                     "fileName" to name, "fileSize" to size,
                                     "accessibleViaAndroid" to true)

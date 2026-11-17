@@ -164,9 +164,7 @@ class _VideoAnalysisPageState extends State<VideoAnalysisPage>
                 const SizedBox(height: 12),
                 LinearProgressIndicator(value: progress),
                 if (data != null)
-                  Text(
-                    '${data.completed} / ${data.total} frames · ${data.label}',
-                  ),
+                  Text('${data.completed} / ${data.total} frames'),
                 const SizedBox(height: 12),
                 TextButton(
                   onPressed: _exit,
