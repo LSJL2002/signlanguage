@@ -75,6 +75,30 @@ void main() {
     expect(records[1]['classifierHand'], 'Left');
     expect(records.last['status'], 'complete');
   });
+  test('Stage 1 runs after frames and saves gloss without replacing per-frame classifier', () async {
+    messenger.setMockMethodCallHandler(PoseService.channel, (call) async {
+      if (call.method == 'openVideo') return {'durationUs': 100000};
+      if (call.method == 'detectVideoFrame') return packet(call);
+      return null;
+    });
+    final updates = <VideoAnalysisUpdate>[];
+    final file = File('${directory.path}/onnx.jsonl');
+    await VideoAnalysisService(
+      classify: classify,
+      recognize: (frames) async {
+        expect(frames.length, 1);
+        expect(frames.single.length, 123);
+        return 'test gloss';
+      },
+    ).analyze('content://test', file, updates.add);
+    expect(updates.last.label, 'test gloss');
+    final records = (await file.readAsLines()).map(jsonDecode).toList();
+    expect(
+      records.where((r) => r['type'] == 'stage1').single['gloss'],
+      'test gloss',
+    );
+    expect(records[1]['classification']['label'], 'test');
+  });
   test('cancellation during inference discards in-flight result and closes decoder', () async {
     final started = Completer<void>();
     final gate = Completer<void>();

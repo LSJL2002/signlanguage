@@ -19,6 +19,8 @@ import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.StandardMethodCodec
 import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.FileInputStream
 
 /** Dedicated serial background queue: pose inference never blocks the UI thread. */
 class PoseChannel(context: Context, messenger: BinaryMessenger) {
@@ -95,20 +97,32 @@ class PoseChannel(context: Context, messenger: BinaryMessenger) {
                             val retriever = MediaMetadataRetriever()
                             try {
                                 val uri = Uri.parse(requireNotNull(call.argument<String>("uri")))
-                                require(uri.scheme == "content") { "Select a video using the document picker" }
                                 var name: String? = null
                                 var size: Long? = null
-                                context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use { cursor ->
-                                    if (cursor.moveToFirst()) {
-                                        val ni = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                                        val si = cursor.getColumnIndex(OpenableColumns.SIZE)
-                                        if (ni >= 0 && !cursor.isNull(ni)) name = cursor.getString(ni)
-                                        if (si >= 0 && !cursor.isNull(si)) size = cursor.getLong(si)
+                                when (uri.scheme) {
+                                    "content" -> {
+                                        context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+                                            if (cursor.moveToFirst()) {
+                                                val ni = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                                                val si = cursor.getColumnIndex(OpenableColumns.SIZE)
+                                                if (ni >= 0 && !cursor.isNull(ni)) name = cursor.getString(ni)
+                                                if (si >= 0 && !cursor.isNull(si)) size = cursor.getLong(si)
+                                            }
+                                        }
+                                        // Preserve picker grants; do not derive a gallery filesystem path.
+                                        retriever.setDataSource(context, uri)
                                     }
+                                    null, "file" -> {
+                                        val file = File(requireNotNull(uri.path)).canonicalFile
+                                        require(file.isAbsolute && file.isFile && file.canRead()) { "Recorded video is missing or unreadable" }
+                                        require(file.length() > 0) { "Recorded video is empty" }
+                                        name = file.name
+                                        size = file.length()
+                                        FileInputStream(file).use { retriever.setDataSource(it.fd) }
+                                    }
+                                    else -> throw IllegalArgumentException("Unsupported video reference: ${uri.scheme}")
                                 }
-                                Log.i("KSL_VIDEO_PICK", "KSL_VIDEO_PICK uri=$uri name=$name extension=${name?.substringAfterLast('.', "")} size=$size content=${uri.scheme == "content"}")
-                                // ContentResolver grants are used directly; never derive a gallery file path.
-                                retriever.setDataSource(context, uri)
+                                Log.i("KSL_VIDEO_PICK", "KSL_VIDEO_PICK uri=$uri name=$name size=$size content=${uri.scheme == "content"}")
                                 Log.i("KSL_VIDEO_PICK", "KSL_VIDEO_PICK accessibleViaAndroid=true uri=$uri")
                                 videoStage = "read metadata"
                                 fun meta(key: Int) = retriever.extractMetadata(key)
@@ -120,7 +134,7 @@ class PoseChannel(context: Context, messenger: BinaryMessenger) {
                                     "width" to meta(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH),
                                     "height" to meta(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT),
                                     "rotation" to meta(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION),
-                                    "mimeType" to (context.contentResolver.getType(uri) ?: meta(MediaMetadataRetriever.METADATA_KEY_MIMETYPE)),
+                                    "mimeType" to ((if (uri.scheme == "content") context.contentResolver.getType(uri) else null) ?: meta(MediaMetadataRetriever.METADATA_KEY_MIMETYPE)),
                                     "frameRate" to meta(MediaMetadataRetriever.METADATA_KEY_CAPTURE_FRAMERATE),
                                     "fileName" to name, "fileSize" to size,
                                     "accessibleViaAndroid" to true)
@@ -153,7 +167,7 @@ class PoseChannel(context: Context, messenger: BinaryMessenger) {
                                     check(scaled.compress(Bitmap.CompressFormat.JPEG, 80, preview))
                                     videoStage = "landmark analysis at ${timestamp / 1000}ms"
                                     val packet = analyzeBitmap(scaled,
-                                        call.argument<Number>("frameId")!!.toLong(), timestamp, 0, false).toMutableMap()
+                                        call.argument<Number>("frameId")!!.toLong(), timestamp, 0, false, uploadedVideo = true).toMutableMap()
                                     Log.i("KSL_VIDEO_FRAME", "KSL_VIDEO_FRAME ts=${timestamp / 1000}ms pipelineSuccess=true previewBytes=${preview.size()}")
                                     packet["preview"] = preview.toByteArray()
                                     packet["timestampKind"] = "requestedSampleTimeUs"
@@ -205,7 +219,7 @@ class PoseChannel(context: Context, messenger: BinaryMessenger) {
     }
 
     private fun analyzeBitmap(bitmap: Bitmap, frameId: Long, timestampUs: Long,
-        rotation: Int, mirror: Boolean): Map<String, Any?> {
+        rotation: Int, mirror: Boolean, uploadedVideo: Boolean = false): Map<String, Any?> {
         val model = checkNotNull(detector) { "Pose detector not initialized" }
         val image = BitmapImageBuilder(bitmap).build()
         try {
@@ -225,9 +239,11 @@ class PoseChannel(context: Context, messenger: BinaryMessenger) {
             detected.landmarks().forEachIndexed { i, landmarks ->
                 val category = detected.handedness()[i].maxByOrNull { it.score() }
                 if (category != null && category.score() >= 0.6f) {
-                    // MediaPipe Hands handedness assumes selfie-mirrored input.
-                    // Our inference input is unmirrored, so correct to anatomical side.
-                    val side = if (category.categoryName() == "Left") "rightHand" else "leftHand"
+                    // Uploaded-video Tasks labels already match anatomical Pose/Holistic sides.
+                    // Same-frame device comparisons verified that swapping these labels reverses hands.
+                    // Preserve the existing live-camera convention separately.
+                    val isLeft = category.categoryName() == "Left"
+                    val side = if (isLeft == uploadedVideo) "leftHand" else "rightHand"
                     val prior = grouped[side]?.get("confidence") as? Double ?: 0.0
                     if (category.score() > prior) grouped[side] = mapOf(
                         "handedness" to if (side == "leftHand") "Left" else "Right",
@@ -241,19 +257,42 @@ class PoseChannel(context: Context, messenger: BinaryMessenger) {
             // Same MPImage, rotation, mirror and normalized preview space as Pose/Hands.
             val faceStart = System.nanoTime()
             var facesCount = 0
+            var faceSource = "full-frame"
             val facePoints = try {
-                val faces = face?.detect(image)?.faceLandmarks()
-                facesCount = faces?.size ?: 0
-                faces?.firstOrNull()?.map { point -> mapOf(
-                    "x" to (if (mirror) 1.0 - point.x() else point.x().toDouble()),
-                    "y" to point.y().toDouble(), "z" to point.z().toDouble()
-                ) } ?: emptyList()
+                val roi = if (uploadedVideo) PoseFaceCrop.bounds(bitmap.width, bitmap.height, body, mirror) else null
+                val croppedPoints = if (roi != null && face != null) {
+                    try {
+                        val crop = Bitmap.createBitmap(bitmap, roi.left, roi.top, roi.width(), roi.height())
+                        val cropImage = BitmapImageBuilder(crop).build()
+                        try {
+                            face?.detect(cropImage)?.faceLandmarks()?.firstOrNull()?.map { point ->
+                                PoseFaceCrop.project(point.x().toDouble(), point.y().toDouble(), point.z().toDouble(),
+                                    roi, bitmap.width, bitmap.height, mirror)
+                            }
+                        } finally { cropImage.close() }
+                    } catch (e: Exception) {
+                        Log.w("KSL_FACE", "Pose-guided Face crop failed; trying full frame f=$frameId", e)
+                        null
+                    }
+                } else null
+                if (!croppedPoints.isNullOrEmpty()) {
+                    facesCount = 1
+                    faceSource = "pose-crop"
+                    croppedPoints
+                } else {
+                    val faces = face?.detect(image)?.faceLandmarks()
+                    facesCount = faces?.size ?: 0
+                    faces?.firstOrNull()?.map { point -> mapOf(
+                        "x" to (if (mirror) 1.0 - point.x() else point.x().toDouble()),
+                        "y" to point.y().toDouble(), "z" to point.z().toDouble()
+                    ) } ?: emptyList()
+                }
             } catch (e: Exception) {
                 Log.e("KSL_FACE", "KSL_FACE detect FAILED f=$frameId timestampUs=$timestampUs", e)
                 emptyList()
             }
             val faceMs = (System.nanoTime() - faceStart) / 1_000_000.0
-            Log.i("KSL_FACE", "KSL_FACE f=$frameId timestampUs=$timestampUs faces=$facesCount landmarks=${facePoints.size} lm0=${facePoints.firstOrNull()} ms=$faceMs poseMs=$poseMs handMs=$handMs rotation=$rotation mirror=$mirror input=${bitmap.width}x${bitmap.height} error=$faceError")
+            Log.i("KSL_FACE", "KSL_FACE f=$frameId timestampUs=$timestampUs faces=$facesCount landmarks=${facePoints.size} lm0=${facePoints.firstOrNull()} ms=$faceMs poseMs=$poseMs handMs=$handMs rotation=$rotation mirror=$mirror input=${bitmap.width}x${bitmap.height} error=$faceError source=$faceSource")
             Log.i("KSL_SEND", "KSL_SEND frameId=$frameId face landmark count=${facePoints.size}")
             return mapOf(
                 "face" to facePoints,

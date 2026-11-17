@@ -6,15 +6,18 @@ import 'package:flutter/foundation.dart';
 
 import 'hand_detector_service.dart';
 import 'pose_service.dart';
+import 'stage1_onnx_service.dart';
 
 /// Sequential sampling: timestamps describe requested sample times, not codec PTS.
 class VideoAnalysisService {
   VideoAnalysisService({
     required this.classify,
     this.channel = PoseService.channel,
+    this.recognize,
   });
   final HandAnalysisDebugResult Function(List<Landmark>?) classify;
   final MethodChannel channel;
+  final Future<String> Function(List<List<List<double>>>)? recognize;
   bool cancelled = false;
   static const intervalUs = 100000; // 10 FPS, independent of inference speed.
   static int sampleCount(int durationUs) =>
@@ -26,6 +29,8 @@ class VideoAnalysisService {
     void Function(VideoAnalysisUpdate) onFrame,
   ) async {
     RandomAccessFile? writer;
+    final sequence = <List<List<double>>>[];
+    VideoAnalysisUpdate? latest;
     var stage = 'open video';
     final reference = Uri.parse(uri);
     debugPrint(
@@ -61,6 +66,7 @@ class VideoAnalysisService {
         }
         stage = 'parse landmarks at ${timestamp ~/ 1000}ms';
         final frame = TrackingFrame.fromMap(raw);
+        if (recognize != null) sequence.add(Stage1OnnxService.mapFrame(raw));
         final selected = frame.rightHand ?? frame.leftHand;
         final classification = classify(selected?.landmarks);
         Map<String, dynamic>? hand(TrackedHand? h) => h == null
@@ -84,17 +90,37 @@ class VideoAnalysisService {
             'classification': {'hasHand': classification.hasHand, 'sign': classification.predictedSign, 'label': classification.predictedLabel},
           })}\n',
         );
-        onFrame(
-          VideoAnalysisUpdate(
-            frame,
-            raw['preview'] as Uint8List?,
-            (raw['width'] as num).toDouble() /
-                (raw['height'] as num).toDouble(),
-            i + 1,
-            total,
-            classification.predictedLabel,
-          ),
+        latest = VideoAnalysisUpdate(
+          frame,
+          raw['preview'] as Uint8List?,
+          (raw['width'] as num).toDouble() / (raw['height'] as num).toDouble(),
+          i + 1,
+          total,
+          classification.predictedLabel,
         );
+        onFrame(latest);
+      }
+      if (!cancelled && recognize != null && sequence.isNotEmpty) {
+        stage = 'Stage 1 ONNX inference';
+        final gloss = await recognize!(sequence);
+        if (!cancelled) {
+          await writer.writeString(
+            '${jsonEncode({'type': 'stage1', 'gloss': gloss, 'frames': sequence.length})}\n',
+          );
+          debugPrint('KSL_STAGE1_ONNX gloss=$gloss');
+          if (latest != null) {
+            onFrame(
+              VideoAnalysisUpdate(
+                latest.frame,
+                latest.preview,
+                latest.aspectRatio,
+                latest.completed,
+                latest.total,
+                gloss,
+              ),
+            );
+          }
+        }
       }
       await writer.writeString(
         '${jsonEncode({'type': 'completion', 'status': cancelled ? 'cancelled' : 'complete'})}\n',

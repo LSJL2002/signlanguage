@@ -6,6 +6,8 @@ import 'package:path_provider/path_provider.dart';
 
 import 'services/hand_detector_service.dart';
 import 'services/video_analysis_service.dart';
+import 'services/stage1_onnx_service.dart';
+import 'services/stage2_onnx_service.dart';
 import 'widgets/pose_painter.dart';
 
 class VideoAnalysisPage extends StatefulWidget {
@@ -28,12 +30,19 @@ class _VideoAnalysisPageState extends State<VideoAnalysisPage>
   bool _done = false;
   bool _leaving = false;
   String? _error;
+  String? _gloss;
+  bool _translating = false;
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _service = VideoAnalysisService(
       classify: widget.detector.classifyLandmarks,
+      recognize: (frames) async {
+        final gloss = await Stage1OnnxService().infer(frames);
+        _gloss = gloss;
+        return gloss;
+      },
     );
     _task = _run();
   }
@@ -50,6 +59,23 @@ class _VideoAnalysisPageState extends State<VideoAnalysisPage>
       await _service.analyze(widget.uri, output, (update) {
         if (mounted) setState(() => _latest = update);
       });
+      if (!_service.cancelled && mounted) {
+        final gloss = _gloss ?? '';
+        if (gloss.trim().isEmpty) {
+          _error = 'No glosses recognized. Please try another video.';
+        } else {
+          setState(() => _translating = true);
+          final sentence = await Stage2OnnxService().translate(gloss);
+          if (!_service.cancelled && mounted) {
+            setState(() => _done = true);
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (mounted && !_service.cancelled) {
+                Navigator.of(context).pop(sentence);
+              }
+            });
+          }
+        }
+      }
       debugPrint(
         '[video analysis] frames=${_latest?.completed ?? 0} cancelled=${_service.cancelled} output=${output.path}',
       );
@@ -94,7 +120,9 @@ class _VideoAnalysisPageState extends State<VideoAnalysisPage>
         _error ??
         (_done
             ? (_service.cancelled ? 'Analysis stopped' : 'Analysis complete')
-            : 'Analyzing ${(progress * 100).floor()}%');
+            : (_translating
+                  ? 'Translating to Korean…'
+                  : 'Analyzing ${(progress * 100).floor()}%'));
     return PopScope(
       canPop: _done,
       onPopInvokedWithResult: (didPop, _) {
@@ -136,9 +164,7 @@ class _VideoAnalysisPageState extends State<VideoAnalysisPage>
                 const SizedBox(height: 12),
                 LinearProgressIndicator(value: progress),
                 if (data != null)
-                  Text(
-                    '${data.completed} / ${data.total} frames · ${data.label}',
-                  ),
+                  Text('${data.completed} / ${data.total} frames'),
                 const SizedBox(height: 12),
                 TextButton(
                   onPressed: _exit,
