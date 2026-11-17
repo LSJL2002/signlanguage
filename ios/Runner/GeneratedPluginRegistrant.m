@@ -12,6 +12,18 @@
 @import camera_avfoundation;
 #endif
 
+#if __has_include(<file_picker_darwin/FilePickerPlugin.h>)
+#import <file_picker_darwin/FilePickerPlugin.h>
+#else
+@import file_picker_darwin;
+#endif
+
+#if __has_include(<flutter_secure_storage_darwin/FlutterSecureStorageDarwinPlugin.h>)
+#import <flutter_secure_storage_darwin/FlutterSecureStorageDarwinPlugin.h>
+#else
+@import flutter_secure_storage_darwin;
+#endif
+
 #if __has_include(<gal/GalPlugin.h>)
 #import <gal/GalPlugin.h>
 #else
@@ -34,6 +46,8 @@
 
 + (void)registerWithRegistry:(NSObject<FlutterPluginRegistry>*)registry {
   [CameraPlugin registerWithRegistrar:[registry registrarForPlugin:@"CameraPlugin"]];
+  [FilePickerPlugin registerWithRegistrar:[registry registrarForPlugin:@"FilePickerPlugin"]];
+  [FlutterSecureStorageDarwinPlugin registerWithRegistrar:[registry registrarForPlugin:@"FlutterSecureStorageDarwinPlugin"]];
   [GalPlugin registerWithRegistrar:[registry registrarForPlugin:@"GalPlugin"]];
   [GoogleMlKitCommonsPlugin registerWithRegistrar:[registry registrarForPlugin:@"GoogleMlKitCommonsPlugin"]];
   [GoogleMlKitPoseDetectionPlugin registerWithRegistrar:[registry registrarForPlugin:@"GoogleMlKitPoseDetectionPlugin"]];
