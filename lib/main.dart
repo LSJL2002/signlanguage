@@ -16,6 +16,7 @@ import 'services/online_api_settings.dart';
 import 'online_api_settings_page.dart';
 import 'services/pose_service.dart';
 import 'video_analysis_page.dart';
+import 'text_to_sign_page.dart';
 
 final trackingRouteObserver = RouteObserver<ModalRoute<void>>();
 List<CameraDescription> cameras = [];
@@ -952,6 +953,18 @@ class _CameraScreenState extends State<CameraScreen>
                               ),
                             ),
                       icon: const Icon(Icons.settings_outlined),
+                    ),
+                    const SizedBox(width: 8),
+                    IconButton.filledTonal(
+                      tooltip: '문장 → 수어 / Text to Sign',
+                      onPressed: _busy || _recording
+                          ? null
+                          : () => Navigator.of(context).push(
+                              MaterialPageRoute<void>(
+                                builder: (_) => const TextToSignPage(),
+                              ),
+                            ),
+                      icon: const Icon(Icons.sign_language),
                     ),
                   ],
                 ),

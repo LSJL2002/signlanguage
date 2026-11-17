@@ -29,7 +29,9 @@ dev_dependencies:
 flutter:
   uses-material-design: true
   assets:
-    - assets/models/
+    # Only this file in assets/models/ is used by the app (stage1_inference_service.dart).
+    # Listing the whole folder also bundled ~1.2 GB of unused copies (model.safetensors etc.).
+    - assets/models/stage1_model_float32.tflite
     - saved_models/stage1_model.onnx
     - saved_models/stage1_model.onnx.data
     - saved_models/gloss_to_id.json
@@ -38,3 +40,12 @@ flutter:
     - saved_models/decoder_model_quantized.onnx
     - saved_models/kobart_tokenizer.json
     - saved_models/kobart_config.json
+    # Text -> sign language (TextToSignChannel.kt)
+    - saved_models/TextToSignLanguage/t2g_encoder.onnx
+    - saved_models/TextToSignLanguage/t2g_decoder.onnx
+    - saved_models/TextToSignLanguage/t2g_config.json
+    - saved_models/TextToSignLanguage/t2g_tokenizer/tokenizer.json
+    - saved_models/TextToSignLanguage/g2p_encoder.onnx
+    - saved_models/TextToSignLanguage/g2p_decoder.onnx
+    - saved_models/TextToSignLanguage/g2p_config.json
+    - saved_models/TextToSignLanguage/gloss_to_id.json
